@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.18362.0</TargetFramework>
+    <Description>LiveWall 的 Windows 与 Shell 平台适配实现。</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\LiveWall.Application\LiveWall.Application.csproj" />
+    <ProjectReference Include="..\LiveWall.Domain\LiveWall.Domain.csproj" />
+  </ItemGroup>
+</Project>
+

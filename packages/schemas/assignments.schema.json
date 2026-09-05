@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livewall.local/schemas/assignments.schema.json",
+  "title": "LiveWall display assignments",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "assignments"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "assignments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["displayId", "wallpaperId", "layoutMode", "fitMode", "presetId"],
+        "properties": {
+          "displayId": { "type": "string", "minLength": 1 },
+          "wallpaperId": { "type": "string", "minLength": 1 },
+          "layoutMode": { "enum": ["perDisplay", "duplicate", "span"] },
+          "fitMode": { "enum": ["cover", "contain", "stretch", "center"] },
+          "presetId": { "type": ["string", "null"], "minLength": 1 }
+        }
+      }
+    }
+  }
+}

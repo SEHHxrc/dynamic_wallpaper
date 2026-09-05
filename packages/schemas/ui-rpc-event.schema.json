@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livewall.local/schemas/ui-rpc-event-v1.json",
+  "title": "LiveWall UI RPC Event v1",
+  "type": "object",
+  "required": ["protocolVersion", "eventId", "stateRevision", "type", "payload"],
+  "properties": {
+    "protocolVersion": { "const": 1 },
+    "eventId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "stateRevision": { "type": "integer", "minimum": 0 },
+    "type": {
+      "enum": [
+        "AppStateChanged", "LibraryChanged", "ImportProgressChanged",
+        "AssignmentChanged", "PlaybackStateChanged", "DisplayTopologyChanged",
+        "RendererFaulted", "CompatibilityWarningRaised"
+      ]
+    },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": true
+}

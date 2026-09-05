@@ -1,0 +1,28 @@
+# Build output
+bin/
+obj/
+artifacts/
+TestResults/
+
+# Project-scoped .NET development environment
+.dotnet/
+.dotnet-cli-home/
+.nuget/
+.cache/
+
+# IDE and user state
+.vs/
+.idea/
+.vscode/settings.json
+*.user
+*.suo
+
+# Runtime/user data must never enter source control
+*.log
+crash/
+cache/
+library/
+
+# Native/runtime dependencies are restored or packaged separately
+runtimes/
+third_party/bin/

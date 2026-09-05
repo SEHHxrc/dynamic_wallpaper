@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>LiveWall 跨进程 RPC 与 Renderer 协议的数据契约。</Description>
+  </PropertyGroup>
+</Project>
+

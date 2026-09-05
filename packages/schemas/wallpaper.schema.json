@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livewall.local/schemas/wallpaper-v1.json",
+  "title": "LiveWall Wallpaper Manifest v1",
+  "type": "object",
+  "required": ["schemaVersion", "id", "version", "title", "type", "entry", "permissions", "defaults"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$", "maxLength": 128 },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$", "maxLength": 64 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "author": { "type": "string", "maxLength": 200 },
+    "type": { "enum": ["video", "web", "image"] },
+    "entry": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(content|web)/(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)[^\\\\:\\u0000-\\u001F]+$"
+    },
+    "preview": { "type": "string", "pattern": "^preview\\.(webp|png|jpg|jpeg)$" },
+    "permissions": {
+      "type": "object",
+      "required": ["network", "audioCapture", "pointerInput", "systemMetrics"],
+      "properties": {
+        "network": { "type": "boolean", "default": false },
+        "audioCapture": { "type": "boolean", "default": false },
+        "pointerInput": { "type": "boolean", "default": false },
+        "systemMetrics": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    },
+    "defaults": {
+      "type": "object",
+      "required": ["fit", "fpsLimit", "muted"],
+      "properties": {
+        "fit": { "enum": ["cover", "contain", "stretch", "center"] },
+        "fpsLimit": { "type": "integer", "minimum": 1, "maximum": 240 },
+        "muted": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

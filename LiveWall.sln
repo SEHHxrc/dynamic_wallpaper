@@ -1,0 +1,108 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Domain", "src\LiveWall.Domain\LiveWall.Domain.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A01}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Contracts", "src\LiveWall.Contracts\LiveWall.Contracts.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A02}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Application", "src\LiveWall.Application\LiveWall.Application.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A03}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Platform.Windows", "src\LiveWall.Platform.Windows\LiveWall.Platform.Windows.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A04}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Infrastructure", "src\LiveWall.Infrastructure\LiveWall.Infrastructure.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A05}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Importers", "src\LiveWall.Importers\LiveWall.Importers.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A06}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Host", "src\LiveWall.Host\LiveWall.Host.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A07}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.UI", "src\LiveWall.UI\LiveWall.UI.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A08}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Renderer.Video", "src\LiveWall.Renderer.Video\LiveWall.Renderer.Video.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A09}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Renderer.Web", "src\LiveWall.Renderer.Web\LiveWall.Renderer.Web.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10A10}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Domain.Tests", "tests\LiveWall.Domain.Tests\LiveWall.Domain.Tests.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10B01}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Application.Tests", "tests\LiveWall.Application.Tests\LiveWall.Application.Tests.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10B02}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Renderer.ContractTests", "tests\LiveWall.Renderer.ContractTests\LiveWall.Renderer.ContractTests.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10B03}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Package.Tests", "tests\LiveWall.Package.Tests\LiveWall.Package.Tests.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10B04}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Windows.IntegrationTests", "tests\LiveWall.Windows.IntegrationTests\LiveWall.Windows.IntegrationTests.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10B05}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DesktopHostDiagnostics", "tools\DesktopHostDiagnostics\DesktopHostDiagnostics.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10C01}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A01}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A01}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A01}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A01}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A02}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A02}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A02}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A02}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A03}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A03}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A03}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A03}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A04}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A04}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A04}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A04}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A05}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A05}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A05}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A05}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A06}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A06}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A06}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A06}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A07}.Debug|x64.ActiveCfg = Debug|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A07}.Debug|x64.Build.0 = Debug|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A07}.Release|x64.ActiveCfg = Release|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A07}.Release|x64.Build.0 = Release|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A08}.Debug|x64.ActiveCfg = Debug|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A08}.Debug|x64.Build.0 = Debug|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A08}.Release|x64.ActiveCfg = Release|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A08}.Release|x64.Build.0 = Release|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A09}.Debug|x64.ActiveCfg = Debug|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A09}.Debug|x64.Build.0 = Debug|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A09}.Release|x64.ActiveCfg = Release|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A09}.Release|x64.Build.0 = Release|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A10}.Debug|x64.ActiveCfg = Debug|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A10}.Debug|x64.Build.0 = Debug|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A10}.Release|x64.ActiveCfg = Release|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10A10}.Release|x64.Build.0 = Release|x64
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B01}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B01}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B01}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B01}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B02}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B02}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B02}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B02}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B03}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B03}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B03}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B03}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B04}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B04}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B04}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B04}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B05}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B05}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B05}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10B05}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10C01}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10C01}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10C01}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10C01}.Release|x64.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

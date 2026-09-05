@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>LiveWall 原生包和 Wallpaper Engine 外部内容导入实现。</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\LiveWall.Application\LiveWall.Application.csproj" />
+    <ProjectReference Include="..\LiveWall.Domain\LiveWall.Domain.csproj" />
+  </ItemGroup>
+</Project>
+

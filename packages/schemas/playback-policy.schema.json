@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livewall.local/schemas/playback-policy.schema.json",
+  "title": "LiveWall playback policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "policy"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pauseWhenDisplayOff",
+        "pauseWhenSessionLocked",
+        "pauseInRemoteSession",
+        "pauseOnBattery",
+        "pauseForFullscreenApplication",
+        "defaultFramesPerSecond",
+        "throttledFramesPerSecond"
+      ],
+      "properties": {
+        "pauseWhenDisplayOff": { "type": "boolean" },
+        "pauseWhenSessionLocked": { "type": "boolean" },
+        "pauseInRemoteSession": { "type": "boolean" },
+        "pauseOnBattery": { "type": "boolean" },
+        "pauseForFullscreenApplication": { "type": "boolean" },
+        "defaultFramesPerSecond": { "type": "integer", "minimum": 1, "maximum": 240 },
+        "throttledFramesPerSecond": { "type": "integer", "minimum": 1, "maximum": 240 }
+      }
+    }
+  }
+}

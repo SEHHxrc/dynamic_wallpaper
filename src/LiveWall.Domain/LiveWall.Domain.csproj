@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>LiveWall 的纯领域模型与业务不变量。</Description>
+  </PropertyGroup>
+</Project>
+

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>LiveWall 用例、端口和进程内应用模型。</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\LiveWall.Domain\LiveWall.Domain.csproj" />
+  </ItemGroup>
+</Project>
+

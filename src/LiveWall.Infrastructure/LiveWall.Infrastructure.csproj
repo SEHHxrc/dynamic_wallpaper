@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>LiveWall 配置、持久化、文件、包、IPC 和日志实现。</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\LiveWall.Application\LiveWall.Application.csproj" />
+    <ProjectReference Include="..\LiveWall.Domain\LiveWall.Domain.csproj" />
+    <ProjectReference Include="..\LiveWall.Contracts\LiveWall.Contracts.csproj" />
+  </ItemGroup>
+</Project>
+

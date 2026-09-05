@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://livewall.local/schemas/renderer-envelope-v1.json",
+  "title": "LiveWall Renderer Envelope v1",
+  "type": "object",
+  "required": ["protocol", "messageId", "sessionId", "generation", "type", "payload"],
+  "properties": {
+    "protocol": {
+      "type": "object",
+      "required": ["major", "minor"],
+      "properties": {
+        "major": { "const": 1 },
+        "minor": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "messageId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "sessionId": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "generation": { "type": "integer", "minimum": 0 },
+    "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": true
+}
+

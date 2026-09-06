@@ -26,6 +26,6 @@ Host 可引用所有非 UI/Renderer 产品模块并负责装配，但不得让�
 | `Rpc` | DTO 校验、授权与应用模型映射 | 不暴露实现异常 |
 | `Tray` | 最小托盘命令入口 | 只投递 HostCommand |
 
-## 当前 Stage B 差距
+## 当前 Stage B 状态
 
-产品入口尚未接线；`ExplorerRestartedCommand` 尚未进入命令处理分支；首帧后显式 Surface 替换端口尚未实现。上述能力不得因类或命令已经声明而标记为完成，具体整改以 ADR-007 和 `docs/windows-desktop-host.md` 为准。
+`ExplorerRestartedCommand` 已进入命令处理分支，Host 已实现重建 Surface、重新 Attach Renderer 和首帧后显式替换的恢复路径；这些机制已有自动化覆盖，Host-owned DComp 的 Explorer generation 重建也已通过诊断验收。产品入口、独立 Renderer-child 重新附着、DPI、热插拔和多屏矩阵仍未验收，因此 Stage B 仍为 `In progress / Not accepted`。具体边界与状态以 ADR-007、ADR-008、`docs/windows-desktop-host.md` 和 `docs/implementation-status.md` 为准。

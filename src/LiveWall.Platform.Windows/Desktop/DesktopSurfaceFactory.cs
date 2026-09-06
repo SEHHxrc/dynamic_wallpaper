@@ -218,7 +218,17 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         if (!DesktopNativeMethods.EndDeferWindowPos(deferred))
         {
             int error = Marshal.GetLastWin32Error();
-            RollBackVisibility(provisional, replaced);
+            List<Exception> rollbackFailures = RollBackVisibility(provisional, replaced);
+            if (rollbackFailures.Count > 0)
+            {
+                rollbackFailures.Insert(
+                    0,
+                    new Win32Exception(error, "EndDeferWindowPos failed."));
+                throw new AggregateException(
+                    "Surface replacement and visibility rollback failed.",
+                    rollbackFailures);
+            }
+
             throw new Win32Exception(error, "EndDeferWindowPos failed; Surface visibility was rolled back.");
         }
 
@@ -246,9 +256,13 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
 
         foreach (nint window in windows)
         {
-            if (!surfaces.TryGetValue(window, out DesktopSurfaceWindowState state) ||
-                state != expectedState ||
-                !DesktopNativeMethods.IsWindow(window))
+            if (!surfaces.TryGetValue(window, out DesktopSurfaceWindowState state))
+            {
+                throw new InvalidOperationException(
+                    $"The {role} Surface is not owned by this factory.");
+            }
+
+            if (state != expectedState || !DesktopNativeMethods.IsWindow(window))
             {
                 throw new InvalidOperationException(
                     $"The {role} Surface is missing, invalid, or in state '{state}'.");
@@ -293,18 +307,34 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         return next;
     }
 
-    private static void RollBackVisibility(
+    private static List<Exception> RollBackVisibility(
         IEnumerable<nint> provisional,
         IEnumerable<nint> replaced)
     {
+        List<Exception> failures = [];
         foreach (nint window in provisional)
         {
-            _ = SetVisibility(window, visible: false);
+            TrySetVisibility(window, visible: false, failures);
         }
 
         foreach (nint window in replaced)
         {
-            _ = SetVisibility(window, visible: true);
+            TrySetVisibility(window, visible: true, failures);
+        }
+
+        return failures;
+    }
+
+    private static void TrySetVisibility(
+        nint window,
+        bool visible,
+        List<Exception> failures)
+    {
+        if (!SetVisibility(window, visible))
+        {
+            failures.Add(new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                $"Could not {(visible ? "show" : "hide")} Surface 0x{window:X} during rollback."));
         }
     }
 

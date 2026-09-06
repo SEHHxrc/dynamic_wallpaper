@@ -28,7 +28,7 @@ Microsoft 明确规定 `DestroyWindow` 不能销毁其他线程创建的窗口�
 - Explorer 恢复时 `SetParent` 旧 Surface：拒绝。旧父级销毁后句柄可能失效或复用，且无法重新验证完整层级。
 - 把 `TaskbarCreated` 直接解释为 Explorer 重启：拒绝。官方说明 DPI 变化也可能触发。
 
-## 影响
+## 影响（决策时）
 
 - Application 端口会先于代码实现发生受控不一致；Stage B 完成前必须补齐实现和契约测试。
 - Surface 生命周期从二态创建/销毁变为 Provisional/Active/Retired/Destroyed。
@@ -42,3 +42,10 @@ Microsoft 明确规定 `DestroyWindow` 不能销毁其他线程创建的窗口�
 
 详细接口和验收条件见 `docs/windows-desktop-host.md`。
 
+## 实施记录
+
+截至 2026-09-06，专用 STA Window Dispatcher、hidden provisional Surface、批量 `ReplaceSurfacesAsync`、`TaskbarCreated` 主信号与 350 ms 防抖、Host 重建式恢复，以及诊断工具的 `--shell-topology`/限时 `--color-block` 均已实现并通过自动化测试。P1 Raised Desktop 研究另以 `--raised-desktop-probe`/`--raised-desktop-color-block` 隔离实现，不修改 Legacy 路径或生产 Adapter。
+
+`--shell-topology` 还必须记录 session/window station/desktop，并把 `GetShellWindow() == 0` 解释为 `Inconclusive / Shell unavailable`，而不是该 build 的 0 候选。窗口关系算法使用可注入只读探针和合成窗口树自动验证；真实 Explorer 结果仍只属于交互式桌面验收。
+
+这只关闭了 ADR 的代码迁移项，没有关闭真实 Windows Shell 验收项。Legacy WorkerW 的生产 allowlist 仍为空；`26200.9168` 在当前 Legacy 参数下不受支持。Raised 的两种 GDI 路径不可见，但无边框 Host-owned DComp 已通过单屏呈现和 Explorer generation 重建诊断验收，确认新旧 Shell PID/HWND 不复用、重新发现和新 Surface 创建成立。该结果仍未覆盖独立 Renderer child、产品恢复和完整显示矩阵，初次 Raised 请求的 Shell WorkerW 副作用也未证明可撤销；生产 Raised Desktop 继续主动失败。结构候选、可见呈现与生产 attachment 的后续边界由 ADR-008 定义。Stage B 保持 `In progress / Not accepted`，详情见 `docs/implementation-status.md`。

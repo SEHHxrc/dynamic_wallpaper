@@ -8,11 +8,24 @@ namespace LiveWall.Platform.Windows.Desktop;
 public sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
 {
     public const string AdapterId = "legacy-workerw-v1";
+    private static readonly string[] ValidatedBuilds = [];
+    private readonly bool allowUnvalidatedBuild;
+
+    public LegacyWorkerWAdapter()
+    {
+    }
+
+    internal LegacyWorkerWAdapter(bool allowUnvalidatedBuild)
+    {
+        this.allowUnvalidatedBuild = allowUnvalidatedBuild;
+    }
 
     public bool IsSupported(WindowsShellSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        return true;
+        return allowUnvalidatedBuild ||
+            (snapshot.HasCompleteBuildIdentity &&
+                ValidatedBuilds.Contains(snapshot.FullBuild, StringComparer.Ordinal));
     }
 
     public Task<DesktopAttachPoint> DiscoverAsync(CancellationToken cancellationToken)
@@ -25,11 +38,11 @@ public sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
         }
 
         RequestWorkerWindow(progman);
-        nint worker = FindWallpaperWorkerWindow();
-        if (worker == 0 || !DesktopNativeMethods.IsWindow(worker))
+        nint worker = FindWallpaperWorkerWindow(progman);
+        if (worker == 0)
         {
             throw new DesktopAttachPointUnavailableException(
-                "A WorkerW window behind the desktop icons was not found.");
+                "A WorkerW window behind the desktop icons did not satisfy the process, ownership, DefView, and desktop-bounds rules.");
         }
 
         return Task.FromResult(new DesktopAttachPoint(ToPublicHandle(worker), AdapterId));
@@ -60,7 +73,7 @@ public sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
         }
     }
 
-    private static nint FindWallpaperWorkerWindow()
+    private static nint FindWallpaperWorkerWindow(nint progman)
     {
         nint wallpaperWorker = 0;
         DesktopNativeMethods.EnumWindowsProcedure callback = (topLevel, _) =>
@@ -80,6 +93,11 @@ public sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
                 topLevel,
                 "WorkerW",
                 null);
+            if (!IsValidWallpaperWorker(wallpaperWorker, progman))
+            {
+                wallpaperWorker = 0;
+            }
+
             return wallpaperWorker == 0;
         };
 
@@ -94,6 +112,44 @@ public sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
 
         return wallpaperWorker;
     }
+
+    private static bool IsValidWallpaperWorker(nint worker, nint progman)
+    {
+        if (worker == 0 ||
+            !DesktopNativeMethods.IsWindow(worker) ||
+            DesktopNativeMethods.GetWindow(
+                worker,
+                DesktopNativeMethods.GetWindowOwner) != 0 ||
+            DesktopNativeMethods.FindWindowEx(
+                worker,
+                0,
+                "SHELLDLL_DefView",
+                null) != 0)
+        {
+            return false;
+        }
+
+        _ = DesktopNativeMethods.GetWindowThreadProcessId(progman, out uint progmanProcessId);
+        _ = DesktopNativeMethods.GetWindowThreadProcessId(worker, out uint workerProcessId);
+        if (progmanProcessId == 0 || workerProcessId != progmanProcessId)
+        {
+            return false;
+        }
+
+        return DesktopNativeMethods.GetWindowRect(progman, out NativeRect progmanBounds) &&
+            DesktopNativeMethods.GetWindowRect(worker, out NativeRect workerBounds) &&
+            HasPositiveArea(workerBounds) &&
+            HasEqualBounds(workerBounds, progmanBounds);
+    }
+
+    private static bool HasPositiveArea(NativeRect bounds) =>
+        bounds.Right > bounds.Left && bounds.Bottom > bounds.Top;
+
+    private static bool HasEqualBounds(NativeRect left, NativeRect right) =>
+        left.Left == right.Left &&
+        left.Top == right.Top &&
+        left.Right == right.Right &&
+        left.Bottom == right.Bottom;
 
     private static ulong ToPublicHandle(nint handle) =>
         unchecked((ulong)handle.ToInt64());

@@ -1,0 +1,20 @@
+[
+  {
+    "Name": "LiveWall Host",
+    "Projects": [
+      {
+        "Path": "src\\LiveWall.Host\\LiveWall.Host.csproj",
+        "Action": "Start"
+      }
+    ]
+  },
+  {
+    "Name": "Desktop Host Diagnostics (read-only)",
+    "Projects": [
+      {
+        "Path": "tools\\DesktopHostDiagnostics\\DesktopHostDiagnostics.csproj",
+        "Action": "Start"
+      }
+    ]
+  }
+]

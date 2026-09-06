@@ -1,3 +1,4 @@
+using System.Globalization;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
 
@@ -57,7 +58,18 @@ public sealed record DesktopSurface(
     IReadOnlyList<DisplayId> DisplayIds,
     ulong WindowHandle);
 
-public sealed record WindowsShellSnapshot(string Version, string Build, bool RaisedDesktopEnabled);
+public sealed record WindowsShellSnapshot(
+    string Version,
+    string Build,
+    bool RaisedDesktopEnabled,
+    int? UpdateBuildRevision = null)
+{
+    public bool HasCompleteBuildIdentity => UpdateBuildRevision is not null;
+
+    public string FullBuild => UpdateBuildRevision is null
+        ? Build
+        : $"{Build}.{UpdateBuildRevision.Value.ToString(CultureInfo.InvariantCulture)}";
+}
 
 public sealed class DisplayTopologyChangedEventArgs(DisplayTopology previous, DisplayTopology current)
     : EventArgs

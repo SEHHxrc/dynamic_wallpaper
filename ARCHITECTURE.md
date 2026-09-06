@@ -506,7 +506,22 @@ public sealed record SurfaceReplacement(
     long DesktopTopologyRevision);
 ```
 
-`CreateSurfaceAsync` 创建隐藏的 provisional 容器 HWND。Host 通过 Renderer Protocol 的 `AttachSurface` 把该句柄交给 Renderer；Renderer 只在容器内创建自己的子窗口并返回 `SurfaceAttached`，Renderer HWND 不反向穿过 Application 端口。全部新 Renderer 报告 `FirstFramePresented` 后，Host 单写者调用 `ReplaceSurfacesAsync` 显式激活新 Surface 并隐藏旧 Surface；只有替换成功才能提交活动会话和 Assignment。
+`CreateSurfaceAsync` 创建隐藏的 provisional Surface。当前 Renderer Protocol v1.0 只定义 `HwndChild` binding：Host 把已验证容器 HWND 交给 Renderer，Renderer 在容器内创建子窗口并返回 `SurfaceAttached`。该方式是一个呈现后端，不是所有 Windows Shell 附着点都天然支持的事实。全部新 Renderer 报告 `FirstFramePresented` 后，Host 单写者调用 `ReplaceSurfacesAsync` 显式激活新 Surface 并隐藏旧 Surface；只有替换成功才能提交活动会话和 Assignment。
+
+桌面附着必须区分：
+
+```text
+Shell 结构发现
+  → StructuralCandidate（parent/owner/process/bounds/Z-order 正确）
+  → PresentationProbe（内容提交并验证真实像素可见）
+  → RenderableDesktopAttachment（可供生产创建 Surface）
+  → Host DesktopSurface/container（绑定当前 Shell generation）
+  → RendererSurfaceBinding（跨进程协议 v1 当前为 HwndChild）
+```
+
+`StructurallyValidated` 不能当作生产 attach point。一个可呈现附着能力至少绑定 AdapterId、完整 build/UBR、结构指纹、Shell generation、PresentationKind 和验收范围；单个 HWND 不足以表达 Raised Desktop。Platform.Windows 内部可以持有包含 parent、DefView Z-order anchor 和 Shell backdrop WorkerW 的短生命周期 `DesktopAttachmentLease`，但这些 Shell HWND 不得持久化、跨进程或暴露给 UI/Domain，Explorer 重建后必须重新发现。
+
+Shell attachment 的呈现路径与 Host ↔ Renderer 的跨进程 binding 是两个独立维度。Renderer 可以在自己的子 HWND 内部使用 GDI、libmpv、WebView2、DirectComposition 或交换链；只要跨进程仍只传 Host 容器 HWND，窗口父子关系和 `SurfaceAttached`/`FirstFramePresented` 语义不变，就仍属于协议 v1 `HwndChild`，不因内部使用 DirectComposition 而升级协议。只有跨进程对象不再是容器 HWND，或 Host 必须接收/合成 Renderer 的共享纹理、交换链句柄、同步 fence 等 GPU 资源时，才需要新的 `RendererSurfaceBinding` 与协议 minor 版本。
 
 Platform.Windows 必须通过唯一专用 Window Dispatcher 线程创建、定位、显隐、换父级和销毁所有自有 HWND。该线程设为 STA 并运行 Win32 消息循环；`DestroyWindow` 必须在创建窗口的线程执行。逻辑状态提交是原子的；同一父 HWND 的视觉交换使用 DeferWindowPos 系列尽量在一个屏幕刷新周期完成，不承诺跨父窗口的操作系统事务原子性。
 
@@ -525,7 +540,7 @@ public interface IDesktopHostAdapter
 }
 ```
 
-`IsSupported` 必须基于已验证的 Shell build 能力和层级规则，不能只依赖用户开关。`RecoverAsync` 只重新探测/准备附着点，不得尝试复用或重挂旧 Surface HWND。Raised Desktop 在诊断矩阵完成前保持禁用；Legacy WorkerW 也属于 Experimental 回退策略。
+`IsSupported` 必须基于已验证的 Shell build、层级规则和呈现能力，不能只依赖用户开关。`RecoverAsync` 只重新探测/准备附着能力，不得尝试复用或重挂旧 Surface HWND。当前代码中的 `DesktopAttachPoint(WindowHandle, AdapterId)` 是仅能表达已验证 single-parent HWND 后端的过渡形状，不得用于生产 Raised Desktop；在启用 Raised 前必须按 ADR-008 迁移为不泄漏 Shell 句柄的能力描述符和 Platform.Windows 内部 Lease。Raised Desktop 在呈现与恢复矩阵完成前保持禁用；Legacy WorkerW 也属于 Experimental 回退策略。
 
 ### 7.8 显示器与布局
 
@@ -627,6 +642,8 @@ Shutdown
 ```
 
 `CapturePreview` 不属于协议 v1.0；只有在定义强类型结果事件并把协议 minor 提升到 1.1 后才能加入。
+
+`AttachSurface.windowHandle` 在 v1.0 中只表示 `HwndChild` binding。结构合规的 Shell parent 不足以证明该 binding 可见，必须以独立 Renderer 进程创建自有 child HWND 并提交真实内容验证。Renderer 在该 child HWND 内绑定自有 DirectComposition target/交换链仍属于 v1，实现细节不进入 wire payload。只有 Host 与 Renderer 之间需要传递 HWND 之外的共享纹理、交换链、fence 或其他 GPU 资源，或 Host 成为 Renderer 帧的合成所有者时，才必须通过 capability 协商新增版本化 `SurfaceBinding`，同步升级 Schema 与契约测试；不得复用 `windowHandle` 字段承载不同对象语义。
 
 ### 8.3 Renderer 发往 Host 的事件
 
@@ -1111,7 +1128,7 @@ wallpaper.lwpkg
 - `ReplaceSurfacesAsync` 显式首帧交换；
 - PerMonitorV2 DPI。
 
-完成定义：显式启动、超时自动清理的测试色块窗口能稳定显示在图标下方；窗口操作线程一致；首帧前新 Surface 不可见；并通过 Explorer 重启、DPI 误触发、热插拔和多屏交换测试。完成这些真实桌面验收前 Stage B 状态必须保持 `In progress / Not accepted`。
+完成定义：至少存在一种 `RenderableDesktopAttachment`；生产候选 Renderer binding 在真实独立进程中通过呈现验证；显式启动、超时自动清理的测试内容不仅满足 HWND/Z-order 结构，而且真实像素能稳定显示在图标下方；窗口操作线程一致；首帧前新 Surface 不可见；LiveWall 自有资源清理与 Shell 变更恢复分别通过，并完成 Explorer 重启、DPI 误触发、热插拔和多屏交换测试。完成这些真实桌面验收前 Stage B 状态必须保持 `In progress / Not accepted`。
 
 ### 阶段 C：Video Renderer
 

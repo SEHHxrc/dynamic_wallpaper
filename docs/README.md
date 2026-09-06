@@ -23,6 +23,7 @@
 | [`package-format.md`](package-format.md) | 原生 `.lwpkg` 公开格式 |
 | [`wallpaper-engine-compatibility.md`](wallpaper-engine-compatibility.md) | `.pkg/.mpkg` 导入边界 |
 | [`security-model.md`](security-model.md) | 不可信内容、进程和 IPC 安全边界 |
-| [`windows-desktop-host.md`](windows-desktop-host.md) | Windows 窗口线程、Surface 交换与 Explorer 恢复设计 |
+| [`windows-desktop-host.md`](windows-desktop-host.md) | Windows 结构候选、可呈现附着、窗口线程、Surface 交换与 Explorer 恢复设计 |
+| [`implementation-status.md`](implementation-status.md) | 实现、自动验证和真实桌面验收状态台账 |
 | [`open-decisions.md`](open-decisions.md) | 尚未冻结、不得擅自假定的决策 |
 | [`adr/README.md`](adr/README.md) | 架构决策工作流 |

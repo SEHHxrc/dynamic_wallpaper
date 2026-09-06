@@ -28,6 +28,16 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
     {
     }
 
+    public static WindowsDesktopHost CreateExperimentalDiagnostics(
+        WindowsShellSnapshot shellSnapshot) =>
+        new(
+            shellSnapshot,
+            new DesktopHostAdapterSelector([
+                new RaisedDesktopAdapter(),
+                new LegacyWorkerWAdapter(allowUnvalidatedBuild: true),
+            ]),
+            new NativeDesktopSurfaceFactory());
+
     internal WindowsDesktopHost(
         WindowsShellSnapshot shellSnapshot,
         DesktopHostAdapterSelector adapterSelector,

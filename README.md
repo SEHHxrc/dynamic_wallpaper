@@ -1,12 +1,13 @@
 # LiveWall
 
-LiveWall 是面向 Windows 10 1903+ / Windows 11 的轻量动态壁纸程序。本仓库已建立领域、应用、跨进程契约和进程边界，并具备部分 Foundation 与 Windows Desktop Host 骨架；这些代码尚未接入产品入口，也不表示 Foundation 或 Stage B 已通过完成验收。
+LiveWall 是面向 Windows 10 1903+ / Windows 11 的轻量动态壁纸程序。本仓库已建立领域、应用、跨进程契约和进程边界，并已实现一组可自动验证的 Foundation 与 Windows Desktop Host 机制；这些代码尚未接入产品入口，也不表示 Stage B 已通过真实桌面兼容验收。
 
 ## 权威文档
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md)：最高级架构约束；代码与其冲突时视为代码缺陷。
 - [`docs/README.md`](docs/README.md)：设计文档索引及文档优先级。
-- [`docs/windows-desktop-host.md`](docs/windows-desktop-host.md)：Stage B 的窗口线程、Surface 交换、Explorer 恢复目标设计与当前差距。
+- [`docs/windows-desktop-host.md`](docs/windows-desktop-host.md)：Stage B 的窗口线程、Surface 交换、Explorer 恢复规范与验收边界。
+- [`docs/implementation-status.md`](docs/implementation-status.md)：实现、自动验证与真实桌面验收的统一状态台账。
 - 各 `src/LiveWall.*/README.md`：模块局部契约、允许依赖和禁止事项。
 - 各源码目录中的 `README.md`：该目录的职责、输入输出及扩展点。
 
@@ -43,7 +44,9 @@ Bootstrap 还会生成被 Git 忽略的 `.vscode/settings.json`，让 C# 与 C# 
 
 ## 当前边界
 
-当前可验证的是部分纯逻辑、配置/IPC 基础类、DisplayConfig 拓扑和实验性桌面附着骨架。`RaisedDesktopAdapter` 仍是主动失败并回退的占位实现；现有 Surface 尚无专属窗口线程、隐藏 provisional 状态和显式替换端口；Explorer 监视仍以轮询为主，Host 未处理恢复命令，现有恢复也只尝试重挂旧 HWND；色块诊断尚未实现。产品入口仍是占位程序，Stage B 状态为 `In progress / Not accepted`，不得将当前工程视为可运行产品或已完成桌面宿主。
+当前已实现专用 STA Window Dispatcher、隐藏 provisional Surface、批量 `ReplaceSurfacesAsync`、以 `TaskbarCreated` 为主信号并按 350 ms 防抖的 Shell 失效检测，以及由 Host 驱动的 Surface 重建式恢复。`DesktopHostDiagnostics` 已提供 `--shell-topology`、Legacy `--color-block`，以及隔离的 `--raised-desktop-probe`/`--raised-desktop-color-block`；默认运行仍只读。上述机制已有自动化测试，但尚未通过支持矩阵中的完整 Explorer、DPI、热插拔和多屏验收。
+
+`RaisedDesktopAdapter` 仍是主动失败的占位实现；Legacy WorkerW 与 Raised Desktop 的生产 allowlist 均为空。更准确的当前结论是：完整 build `26200.9168` 在现有 Legacy 参数下不受支持；隔离 Raised Desktop 探针已证明 `0x0D/0x01` 可生成结构合规的 Progman 子 WorkerW。无边框 Host-owned DirectComposition composition swap chain 已通过单屏呈现和 Explorer generation 重建诊断验收：新旧 Shell PID/HWND 不复用，新 Surface 完整覆盖壁纸区域、桌面图标位于其上且任务栏不受影响。下一项门禁是独立 Renderer 在 Host 容器内创建 child HWND 和自有 DComp target/交换链；该路径通过则保留 Renderer Protocol v1，不能仅因使用 DirectComposition 就升级协议。DPI、热插拔、多屏、产品恢复和 Shell mutation recovery 仍未闭环，因此不能启用生产适配器或 allowlist。Stage B 状态保持 `In progress / Not accepted`。详细区分见 [`docs/implementation-status.md`](docs/implementation-status.md) 和 [ADR-008](docs/adr/008-desktop-attachment-capability-and-presentation.md)。
 
 ## 边界检查
 

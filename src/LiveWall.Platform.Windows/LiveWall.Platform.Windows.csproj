@@ -7,5 +7,9 @@
     <ProjectReference Include="..\LiveWall.Application\LiveWall.Application.csproj" />
     <ProjectReference Include="..\LiveWall.Domain\LiveWall.Domain.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" />
+    <PackageReference Include="Vortice.DirectComposition" />
+    <PackageReference Include="Vortice.DXGI" />
+  </ItemGroup>
 </Project>
-

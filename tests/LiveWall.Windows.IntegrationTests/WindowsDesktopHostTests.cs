@@ -9,6 +9,31 @@ namespace LiveWall.Windows.IntegrationTests;
 public sealed class WindowsDesktopHostTests
 {
     [Fact]
+    public void LegacyWorkerWIsDisabledForAnUnvalidatedBuild()
+    {
+        LegacyWorkerWAdapter adapter = new();
+
+        adapter.IsSupported(ShellSnapshot()).Should().BeFalse();
+    }
+
+    [Fact]
+    public void LegacyWorkerWCanBeExplicitlyEnabledForDiagnostics()
+    {
+        LegacyWorkerWAdapter adapter = new(allowUnvalidatedBuild: true);
+
+        adapter.IsSupported(ShellSnapshot()).Should().BeTrue();
+    }
+
+    [Fact]
+    public void ShellSnapshotUsesTheCompleteBuildAsCompatibilityKey()
+    {
+        WindowsShellSnapshot snapshot = ShellSnapshot();
+
+        snapshot.HasCompleteBuildIdentity.Should().BeTrue();
+        snapshot.FullBuild.Should().Be("26100.1234");
+    }
+
+    [Fact]
     public async Task SelectorFallsBackWhenPreferredAttachPointIsUnavailable()
     {
         FakeDesktopAdapter preferred = new(
@@ -173,7 +198,11 @@ public sealed class WindowsDesktopHostTests
     }
 
     private static WindowsShellSnapshot ShellSnapshot() =>
-        new("Windows 11", "26100", RaisedDesktopEnabled: true);
+        new(
+            "Windows 11",
+            "26100",
+            RaisedDesktopEnabled: true,
+            UpdateBuildRevision: 1234);
 
     private sealed class FakeDesktopAdapter : IDesktopHostAdapter
     {

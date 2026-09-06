@@ -42,7 +42,7 @@ Renderer events ------HostCommand-------> |
 |---|---|---|
 | RPC DTO ↔ Application 输入输出 | `Host/Rpc` | 校验所有字符串枚举、长度、路径意图和权限 |
 | Application Renderer 模型 ↔ Renderer DTO | `Host/Orchestration` 或 `Host/Rpc` 内专用 mapper | 必须保留 sessionId、generation、messageId |
-| Windows 原生信息 ↔ Domain/Application | `Platform.Windows` | 不泄漏 COM/句柄所有权；自有 HWND 操作只在 Window Dispatcher |
+| Windows 原生信息 ↔ Domain/Application | `Platform.Windows` | Shell 原生 HWND、Z-order anchor 和 backdrop 只存在于当前 Shell generation 的 Platform 内部 attachment lease；不泄漏 COM/句柄所有权，自有 HWND 操作只在 Window Dispatcher。Application 只接收已验证能力和强类型 Surface binding |
 | 外部包 ↔ 规范化内容 | `Importers` | 生成兼容性报告；不直接写正式 library |
 | 规范化内容 ↔ library | `Infrastructure/Persistence` | 校验后原子提交 |
 
@@ -52,6 +52,7 @@ Renderer events ------HostCommand-------> |
 |---|---|---|
 | 活动会话、Surface、Generation | Host CommandLoop | 只投递命令或读取快照 |
 | Desktop Surface HWND 生命周期 | Platform.Windows Window Dispatcher | 其他线程只提交异步工作项，不直接 Create/Show/SetParent/Destroy |
+| Shell attachment lease 与结构指纹 | Platform.Windows Desktop Adapter | 只在当前 Shell generation 内有效；结构候选、presentation probe 与可渲染 attachment 分阶段，不持久化裸 HWND |
 | 壁纸库持久状态 | Infrastructure Repository | Host 通过 Application 端口访问 |
 | UI 展示状态 | UI | 可丢弃并从 Host 重建 |
 | Renderer 内部播放状态 | 对应 Renderer | 通过事件同步给 Host，Host 决定目标状态 |
@@ -68,3 +69,5 @@ Renderer events ------HostCommand-------> |
 - Wallpaper Engine 命名空间不出现在 Renderer；
 - 跨进程公开 DTO 可被 System.Text.Json 往返序列化。
 - `IDesktopHost` 保持 hidden provisional + 批量显式替换语义，且所有自有 HWND 的创建和销毁线程一致。
+- Shell 结构验证只能产生 `StructuralCandidate`；未通过真实像素 presentation probe 的候选不得成为生产 attachment 或进入 allowlist。
+- Renderer Protocol v1 的 `AttachSurface.windowHandle` 只表示 `HwndChild` binding；Renderer 在自有 child HWND 内使用 DComp/交换链不改变协议。只有跨进程开始传递共享纹理、交换链句柄、fence 或其他非容器 HWND 对象时，才必须升级协议、Schema 与契约测试，且不能重载现有字段。

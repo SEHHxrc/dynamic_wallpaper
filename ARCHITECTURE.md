@@ -525,22 +525,21 @@ Shell attachment 的呈现路径与 Host ↔ Renderer 的跨进程 binding 是�
 
 Platform.Windows 必须通过唯一专用 Window Dispatcher 线程创建、定位、显隐、换父级和销毁所有自有 HWND。该线程设为 STA 并运行 Win32 消息循环；`DestroyWindow` 必须在创建窗口的线程执行。逻辑状态提交是原子的；同一父 HWND 的视觉交换使用 DeferWindowPos 系列尽量在一个屏幕刷新周期完成，不承诺跨父窗口的操作系统事务原子性。
 
-Shell 版本差异继续隔离为：
+Shell 版本差异只存在于 Platform.Windows 内部，不是 Application 公开端口：
 
 ```csharp
-public interface IDesktopHostAdapter
+internal interface IDesktopHostAdapter
 {
     bool IsSupported(WindowsShellSnapshot snapshot);
 
-    Task<DesktopAttachPoint> DiscoverAsync(
-        CancellationToken cancellationToken);
-
-    Task RecoverAsync(
+    Task<DesktopAttachmentLease> DiscoverAsync(
         CancellationToken cancellationToken);
 }
 ```
 
-`IsSupported` 必须基于已验证的 Shell build、层级规则和呈现能力，不能只依赖用户开关。`RecoverAsync` 只重新探测/准备附着能力，不得尝试复用或重挂旧 Surface HWND。当前代码中的 `DesktopAttachPoint(WindowHandle, AdapterId)` 是仅能表达已验证 single-parent HWND 后端的过渡形状，不得用于生产 Raised Desktop；在启用 Raised 前必须按 ADR-008 迁移为不泄漏 Shell 句柄的能力描述符和 Platform.Windows 内部 Lease。Raised Desktop 在呈现与恢复矩阵完成前保持禁用；Legacy WorkerW 也属于 Experimental 回退策略。
+`IsSupported` 必须基于已验证的完整 Shell build/UBR、层级规则和呈现能力，不能只依赖用户开关。每次 Ensure/Recover 都重新发现完整 Lease，不提供重挂旧 HWND 的 Adapter 操作。Application 的 `DesktopTopology` 只能携带无 Shell HWND/PID 的 `DesktopAttachmentCapability(AdapterId, PresentationKind, RendererBinding)`；Surface Factory 在 Platform.Windows 内部消费 Lease，并只把 LiveWall 自有容器 HWND 作为 `DesktopSurface` 返回。
+
+跨 Shell generation 替换时，旧 Surface 记录可以进入 `Retired` 并被幂等清理，但旧 generation 的任何 HWND 都不得再参与 `SetWindowPos`、`SetParent` 或可见性回滚；句柄可能已销毁或被复用。Raised Desktop 在精确 allowlist、完整呈现/恢复/显示矩阵和 Shell mutation recovery 完成前保持禁用；Legacy WorkerW 也属于 Experimental 回退策略。
 
 ### 7.8 显示器与布局
 
@@ -773,7 +772,8 @@ UI.ApplyWallpaper
   → LayoutPlanner.CreatePlan
   → RendererRegistry.Match
   → ProcessSupervisor.Start
-  → Renderer.Initialize/Hello
+  → Renderer.Hello（一次性令牌认证与能力声明）
+  → Host.Initialize → Renderer.Initialized
   → DesktopHost.CreateSurface（hidden/provisional）
   → Renderer.AttachSurface
   → Renderer.LoadWallpaper
@@ -1128,7 +1128,7 @@ wallpaper.lwpkg
 - `ReplaceSurfacesAsync` 显式首帧交换；
 - PerMonitorV2 DPI。
 
-完成定义：至少存在一种 `RenderableDesktopAttachment`；生产候选 Renderer binding 在真实独立进程中通过呈现验证；显式启动、超时自动清理的测试内容不仅满足 HWND/Z-order 结构，而且真实像素能稳定显示在图标下方；窗口操作线程一致；首帧前新 Surface 不可见；LiveWall 自有资源清理与 Shell 变更恢复分别通过，并完成 Explorer 重启、DPI 误触发、热插拔和多屏交换测试。完成这些真实桌面验收前 Stage B 状态必须保持 `In progress / Not accepted`。
+完成定义：至少存在一种 `RenderableDesktopAttachment`；生产候选 Renderer binding 在真实独立进程中通过呈现验证；正式 Renderer v1 会话严格执行 Hello/Initialize/Attach/Load/FirstFrame 状态机并对超时、乱序、重复消息、取消和崩溃失败关闭；显式启动、超时自动清理的测试内容不仅满足 HWND/Z-order 结构，而且真实像素能稳定显示在图标下方；窗口操作线程一致；首帧前新 Surface 不可见；LiveWall 自有资源清理与 Shell 变更恢复分别通过，并完成 Explorer 重启、DPI 误触发、热插拔和多屏交换测试。完成这些真实桌面验收前 Stage B 状态必须保持 `In progress / Not accepted`。
 
 ### 阶段 C：Video Renderer
 

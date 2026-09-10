@@ -2,7 +2,7 @@ using LiveWall.Application.Sessions;
 
 namespace LiveWall.Platform.Windows.Desktop;
 
-public sealed class DesktopHostAdapterSelector
+internal sealed class DesktopHostAdapterSelector
 {
     private readonly IDesktopHostAdapter[] adapters;
 
@@ -32,9 +32,9 @@ public sealed class DesktopHostAdapterSelector
 
             try
             {
-                DesktopAttachPoint attachPoint = await adapter.DiscoverAsync(cancellationToken)
+                DesktopAttachmentLease attachmentLease = await adapter.DiscoverAsync(cancellationToken)
                     .ConfigureAwait(false);
-                return new SelectedDesktopAdapter(adapter, attachPoint);
+                return new SelectedDesktopAdapter(adapter, attachmentLease);
             }
             catch (DesktopAttachPointUnavailableException exception)
             {
@@ -49,6 +49,6 @@ public sealed class DesktopHostAdapterSelector
     }
 }
 
-public sealed record SelectedDesktopAdapter(
+internal sealed record SelectedDesktopAdapter(
     IDesktopHostAdapter Adapter,
-    DesktopAttachPoint AttachPoint);
+    DesktopAttachmentLease AttachmentLease);

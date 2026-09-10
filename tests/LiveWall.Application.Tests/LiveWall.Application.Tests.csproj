@@ -14,6 +14,7 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="..\..\tools\Shared\ProbeFaultPlan.cs" Link="ProbeFaultPlan.cs" />
     <ProjectReference Include="..\..\src\LiveWall.Application\LiveWall.Application.csproj" />
     <ProjectReference Include="..\..\src\LiveWall.Domain\LiveWall.Domain.csproj" />
     <ProjectReference Include="..\..\src\LiveWall.Host\LiveWall.Host.csproj" />

@@ -6,11 +6,11 @@
 
 ## 对外接口
 
-实现 `LiveWall.Application` 中的 `IDesktopHost`、`IDesktopHostAdapter`、`IDisplayTopologySource` 和 `IProcessSupervisor`；对外只返回 Application/Domain 模型，不暴露 COM 对象或裸原生资源所有权。
+实现 `LiveWall.Application` 中的 `IDesktopHost`、`IDisplayTopologySource` 和 `IProcessSupervisor`；`IDesktopHostAdapter` 与 `DesktopAttachmentLease` 是本程序集内部机制。对外只返回 Application/Domain 模型和不含 Shell 句柄的 attachment capability，不暴露 COM 对象或裸原生资源所有权。
 
 `IDesktopHost` 已提供批量 `ReplaceSurfacesAsync`，`CreateSurfaceAsync` 已按约定只创建隐藏 provisional Surface。端口与线程机制已有自动化覆盖，但尚未通过真实 Windows Shell 兼容矩阵；以 `docs/windows-desktop-host.md`、`docs/implementation-status.md`、ADR-007 和 ADR-008 为边界。
 
-Shell 兼容诊断已采集完整 build/UBR 和递归窗口结构；生产适配器只允许使用完整 build 键并在每次发现时重新验证结构与 presentation kind，基础 build 号、一次采样的裸 HWND 或 `StructurallyValidated` 结果都不能作为放行依据。`26200.9168` 的两种 GDI 路径不可见；无边框 Host-owned DirectComposition composition swap chain 已通过单屏真实像素和 Explorer generation 重建诊断验收。独立 Renderer-child binding、产品恢复和剩余显示矩阵仍待完成。
+Shell 兼容诊断已采集完整 build/UBR 和递归窗口结构；生产适配器只允许使用完整 build 键并在每次发现时重新验证结构与 presentation kind，基础 build 号、一次采样的裸 HWND 或 `StructurallyValidated` 结果都不能作为放行依据。`26200.9168` 的两种 GDI 路径不可见；无边框 Host-owned DComp、独立 Renderer-child v1 binding 和跨 Explorer generation 功能恢复已通过。内部 Lease/Factory 与正式 Renderer v1 产品候选入口已接线；交互式主屏单 Surface 首帧已连续两次通过，但首次冷启动超时、物理单屏和双屏覆盖仍待复测。两类生产 allowlist 继续为空，Shell mutation 和剩余显示矩阵未完成。
 
 ## 依赖规则
 
@@ -20,7 +20,7 @@ Shell 兼容诊断已采集完整 build/UBR 和递归窗口结构；生产适配
 
 | 目录 | 功能 | 边界 |
 |---|---|---|
-| `Desktop` | 实验性 WorkerW、Raised Desktop 占位、Explorer 监视、Surface 生命周期 | 未公开 Shell 细节不得外泄；当前未通过 Stage B 真实验收 |
+| `Desktop` | 版本化 WorkerW/Raised Adapter、内部 attachment lease、Explorer 监视、Surface 生命周期 | 未公开 Shell 细节不得外泄；生产 allowlist 为空，当前未通过 Stage B 真实验收 |
 | `Displays` | DisplayConfig 枚举、稳定 ID、拓扑防抖 | 禁止使用显示器数组序号持久化 |
 | `Power` | 电源、屏幕开关和电池事件 | 只报告状态 |
 | `Sessions` | 锁屏、解锁和 RDP 事件 | 只报告状态 |

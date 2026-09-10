@@ -145,6 +145,23 @@ internal sealed class HostState
     public IReadOnlyList<PreparedSession> GetPreparedSessions() =>
         sessions.Values.Select(session => session.Prepared).ToArray();
 
+    public IReadOnlyList<WallpaperAssignment> GetAssignments() =>
+        assignments.Values
+            .OrderBy(assignment => assignment.DisplayId.Value, StringComparer.Ordinal)
+            .ToArray();
+
+    public IReadOnlyList<PreparedSession> InvalidateAllSessions()
+    {
+        PreparedSession[] invalidated = GetPreparedSessions().ToArray();
+        sessions.Clear();
+        if (invalidated.Length > 0)
+        {
+            Revision++;
+        }
+
+        return invalidated;
+    }
+
     public bool ReplaceRecoveredSessions(PreparedRecovery recovery)
     {
         if (!CanReplaceRecoveredSessions(recovery))

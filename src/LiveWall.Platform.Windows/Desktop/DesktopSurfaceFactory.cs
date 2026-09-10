@@ -14,7 +14,7 @@ internal interface IDesktopSurfaceFactory : IAsyncDisposable
     Task<ulong> CreateAsync(
         SurfaceId id,
         SurfaceRequest request,
-        DesktopAttachPoint attachPoint,
+        DesktopAttachmentLease attachmentLease,
         CancellationToken cancellationToken);
 
     Task ReplaceAsync(
@@ -23,6 +23,8 @@ internal interface IDesktopSurfaceFactory : IAsyncDisposable
         CancellationToken cancellationToken);
 
     Task DestroyAsync(ulong surfaceHandle, CancellationToken cancellationToken);
+
+    Task AbandonAsync(ulong surfaceHandle, CancellationToken cancellationToken);
 }
 
 internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
@@ -31,7 +33,8 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
     private readonly DesktopNativeMethods.WindowProcedure windowProcedure;
     private readonly IDesktopWindowDispatcher dispatcher;
     private readonly bool ownsDispatcher;
-    private readonly Dictionary<nint, DesktopSurfaceWindowState> surfaces = [];
+    private readonly Func<DesktopAttachmentLease, bool> shellGenerationValidator;
+    private readonly Dictionary<nint, TrackedDesktopSurfaceWindow> surfaces = [];
     private nint instance;
     private bool registered;
     private bool disposed;
@@ -43,10 +46,13 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
 
     internal NativeDesktopSurfaceFactory(
         IDesktopWindowDispatcher dispatcher,
-        bool ownsDispatcher = false)
+        bool ownsDispatcher = false,
+        Func<DesktopAttachmentLease, bool>? shellGenerationValidator = null)
     {
         this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         this.ownsDispatcher = ownsDispatcher;
+        this.shellGenerationValidator = shellGenerationValidator ??
+            (static attachmentLease => attachmentLease.HasCurrentShellGeneration());
         windowProcedure = WindowProcedure;
     }
 
@@ -57,12 +63,13 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
     public Task<ulong> CreateAsync(
         SurfaceId id,
         SurfaceRequest request,
-        DesktopAttachPoint attachPoint,
+        DesktopAttachmentLease attachmentLease,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(attachmentLease);
         ThrowIfDisposed();
         return dispatcher.InvokeAsync(
-            () => CreateOnDispatcher(id, request, attachPoint),
+            () => CreateOnDispatcher(id, request, attachmentLease),
             cancellationToken);
     }
 
@@ -86,6 +93,14 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         ThrowIfDisposed();
         return dispatcher.InvokeAsync(
             () => DestroyOnDispatcher(ToNativeHandle(surfaceHandle)),
+            cancellationToken);
+    }
+
+    public Task AbandonAsync(ulong surfaceHandle, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        return dispatcher.InvokeAsync(
+            () => AbandonOnDispatcher(ToNativeHandle(surfaceHandle)),
             cancellationToken);
     }
 
@@ -137,19 +152,26 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
     private ulong CreateOnDispatcher(
         SurfaceId id,
         SurfaceRequest request,
-        DesktopAttachPoint attachPoint)
+        DesktopAttachmentLease attachmentLease)
     {
         ThrowIfDisposed();
         LastCreateThreadId = DesktopNativeMethods.GetCurrentThreadId();
         EnsureWindowClassRegistered();
-        nint parent = ToNativeHandle(attachPoint.WindowHandle);
+        ValidateAttachmentLease(attachmentLease);
+        nint parent = ToNativeHandle(attachmentLease.ParentWindowHandle);
         NativeRect parentBounds = GetParentBounds(parent);
         uint style = DesktopNativeMethods.WindowStyleChild |
             DesktopNativeMethods.WindowStyleClipChildren |
-            DesktopNativeMethods.WindowStyleClipSiblings;
+            DesktopNativeMethods.WindowStyleClipSiblings |
+            (attachmentLease.PlacementKind == DesktopSurfacePlacementKind.BetweenAnchorAndBackdrop
+                ? DesktopNativeMethods.WindowStyleDisabled
+                : 0);
         nint window = DesktopNativeMethods.CreateWindowEx(
             DesktopNativeMethods.WindowExStyleNoActivate |
-                DesktopNativeMethods.WindowExStyleToolWindow,
+                DesktopNativeMethods.WindowExStyleToolWindow |
+                (attachmentLease.PlacementKind == DesktopSurfacePlacementKind.BetweenAnchorAndBackdrop
+                    ? DesktopNativeMethods.WindowExStyleNoRedirectionBitmap
+                    : 0),
             className,
             $"LiveWall Surface {id.Value}",
             style,
@@ -168,8 +190,13 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
 
         try
         {
-            PositionHidden(window, request.Bounds, parentBounds);
-            surfaces.Add(window, DesktopSurfaceWindowState.Provisional);
+            PositionHidden(window, request.Bounds, parentBounds, attachmentLease);
+            surfaces.Add(
+                window,
+                new TrackedDesktopSurfaceWindow(
+                    window,
+                    DesktopSurfaceWindowState.Provisional,
+                    attachmentLease));
             return unchecked((ulong)window.ToInt64());
         }
         catch
@@ -185,40 +212,69 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
     {
         ThrowIfDisposed();
         LastReplaceThreadId = DesktopNativeMethods.GetCurrentThreadId();
-        nint[] provisional = ValidateReplacementHandles(
+        TrackedDesktopSurfaceWindow[] provisional = ValidateReplacementHandles(
             provisionalSurfaceHandles,
             DesktopSurfaceWindowState.Provisional,
-            "provisional");
-        nint[] replaced = ValidateReplacementHandles(
+            "provisional",
+            validateCurrentWindow: true);
+        DesktopShellGeneration[] nextGenerations = provisional
+            .Select(window => window.AttachmentLease.ShellGeneration)
+            .Distinct()
+            .ToArray();
+        if (nextGenerations.Length > 1)
+        {
+            throw new InvalidOperationException(
+                "A Surface replacement cannot activate more than one Shell generation.");
+        }
+
+        TrackedDesktopSurfaceWindow[] replaced = ValidateReplacementHandles(
             replacedSurfaceHandles,
             DesktopSurfaceWindowState.Active,
-            "active");
-        if (provisional.Intersect(replaced).Any())
+            "active",
+            validateCurrentWindow: false);
+        if (provisional.Select(item => item.Window)
+            .Intersect(replaced.Select(item => item.Window))
+            .Any())
         {
             throw new ArgumentException("A Surface cannot be both provisional and replaced.");
         }
 
+        DesktopShellGeneration? nextGeneration = nextGenerations.Length == 0
+            ? null
+            : nextGenerations[0];
+        TrackedDesktopSurfaceWindow[] replacedInCurrentGeneration = replaced
+            .Where(window => nextGeneration is null ||
+                window.AttachmentLease.ShellGeneration == nextGeneration.Value)
+            .ToArray();
+        foreach (TrackedDesktopSurfaceWindow window in replacedInCurrentGeneration)
+        {
+            ValidateCurrentSurfaceWindow(window, "active");
+        }
+
         nint deferred = DesktopNativeMethods.BeginDeferWindowPos(
-            checked(provisional.Length + replaced.Length));
+            checked(provisional.Length + replacedInCurrentGeneration.Length));
         if (deferred == 0)
         {
             throw new Win32Exception(Marshal.GetLastWin32Error(), "BeginDeferWindowPos failed.");
         }
 
-        foreach (nint window in replaced)
+        foreach (TrackedDesktopSurfaceWindow window in replacedInCurrentGeneration)
         {
             deferred = DeferVisibility(deferred, window, visible: false);
         }
 
-        foreach (nint window in provisional)
+        foreach (TrackedDesktopSurfaceWindow window in provisional)
         {
+            PrepareBackdrop(window.AttachmentLease);
             deferred = DeferVisibility(deferred, window, visible: true);
         }
 
         if (!DesktopNativeMethods.EndDeferWindowPos(deferred))
         {
             int error = Marshal.GetLastWin32Error();
-            List<Exception> rollbackFailures = RollBackVisibility(provisional, replaced);
+            List<Exception> rollbackFailures = RollBackVisibility(
+                provisional,
+                replacedInCurrentGeneration);
             if (rollbackFailures.Count > 0)
             {
                 rollbackFailures.Insert(
@@ -232,21 +288,22 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
             throw new Win32Exception(error, "EndDeferWindowPos failed; Surface visibility was rolled back.");
         }
 
-        foreach (nint window in replaced)
+        foreach (TrackedDesktopSurfaceWindow window in replaced)
         {
-            surfaces[window] = DesktopSurfaceWindowState.Retired;
+            surfaces[window.Window] = window with { State = DesktopSurfaceWindowState.Retired };
         }
 
-        foreach (nint window in provisional)
+        foreach (TrackedDesktopSurfaceWindow window in provisional)
         {
-            surfaces[window] = DesktopSurfaceWindowState.Active;
+            surfaces[window.Window] = window with { State = DesktopSurfaceWindowState.Active };
         }
     }
 
-    private nint[] ValidateReplacementHandles(
+    private TrackedDesktopSurfaceWindow[] ValidateReplacementHandles(
         IReadOnlyList<ulong> handles,
         DesktopSurfaceWindowState expectedState,
-        string role)
+        string role,
+        bool validateCurrentWindow)
     {
         nint[] windows = handles.Select(ToNativeHandle).ToArray();
         if (windows.Distinct().Count() != windows.Length)
@@ -254,26 +311,52 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
             throw new ArgumentException($"The {role} Surface list contains duplicate handles.");
         }
 
-        foreach (nint window in windows)
+        TrackedDesktopSurfaceWindow[] trackedWindows = new TrackedDesktopSurfaceWindow[windows.Length];
+        for (int index = 0; index < windows.Length; index++)
         {
-            if (!surfaces.TryGetValue(window, out DesktopSurfaceWindowState state))
+            nint window = windows[index];
+            if (!surfaces.TryGetValue(window, out TrackedDesktopSurfaceWindow? tracked))
             {
                 throw new InvalidOperationException(
                     $"The {role} Surface is not owned by this factory.");
             }
 
-            if (state != expectedState || !DesktopNativeMethods.IsWindow(window))
+            if (tracked.State != expectedState)
             {
                 throw new InvalidOperationException(
-                    $"The {role} Surface is missing, invalid, or in state '{state}'.");
+                    $"The {role} Surface is in state '{tracked.State}' instead of '{expectedState}'.");
             }
+
+            if (validateCurrentWindow)
+            {
+                ValidateCurrentSurfaceWindow(tracked, role);
+            }
+
+            trackedWindows[index] = tracked;
         }
 
-        return windows;
+        return trackedWindows;
     }
 
-    private static nint DeferVisibility(nint deferred, nint window, bool visible)
+    private void ValidateCurrentSurfaceWindow(
+        TrackedDesktopSurfaceWindow tracked,
+        string role)
     {
+        if (!DesktopNativeMethods.IsWindow(tracked.Window))
+        {
+            throw new InvalidOperationException(
+                $"The {role} Surface is no longer a valid window in the current Shell generation.");
+        }
+
+        ValidateAttachmentLease(tracked.AttachmentLease);
+    }
+
+    private static nint DeferVisibility(
+        nint deferred,
+        TrackedDesktopSurfaceWindow tracked,
+        bool visible)
+    {
+        nint window = tracked.Window;
         uint flags = DesktopNativeMethods.SetWindowPositionNoActivate |
             DesktopNativeMethods.SetWindowPositionNoMove |
             DesktopNativeMethods.SetWindowPositionNoSize;
@@ -281,7 +364,10 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         if (visible)
         {
             flags |= DesktopNativeMethods.SetWindowPositionShowWindow;
-            insertAfter = DesktopNativeMethods.WindowBottom;
+            insertAfter = tracked.AttachmentLease.PlacementKind ==
+                DesktopSurfacePlacementKind.BetweenAnchorAndBackdrop
+                ? ToNativeHandle(tracked.AttachmentLease.ZOrderAnchorWindowHandle)
+                : DesktopNativeMethods.WindowBottom;
         }
         else
         {
@@ -308,18 +394,18 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
     }
 
     private static List<Exception> RollBackVisibility(
-        IEnumerable<nint> provisional,
-        IEnumerable<nint> replaced)
+        IEnumerable<TrackedDesktopSurfaceWindow> provisional,
+        IEnumerable<TrackedDesktopSurfaceWindow> replaced)
     {
         List<Exception> failures = [];
-        foreach (nint window in provisional)
+        foreach (TrackedDesktopSurfaceWindow window in provisional)
         {
-            TrySetVisibility(window, visible: false, failures);
+            TrySetVisibility(window.Window, visible: false, failures);
         }
 
-        foreach (nint window in replaced)
+        foreach (TrackedDesktopSurfaceWindow window in replaced)
         {
-            TrySetVisibility(window, visible: true, failures);
+            TrySetVisibility(window.Window, visible: true, failures);
         }
 
         return failures;
@@ -363,6 +449,25 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
             throw new Win32Exception(Marshal.GetLastWin32Error(), "DestroyWindow failed.");
         }
 
+        surfaces.Remove(surface);
+    }
+
+    private void AbandonOnDispatcher(nint surface)
+    {
+        LastDestroyThreadId = DesktopNativeMethods.GetCurrentThreadId();
+        if (!surfaces.TryGetValue(surface, out TrackedDesktopSurfaceWindow? tracked))
+        {
+            return;
+        }
+
+        if (shellGenerationValidator(tracked.AttachmentLease))
+        {
+            DestroyOnDispatcher(surface);
+            return;
+        }
+
+        // A stale HWND may already have been destroyed and reused by another owner. Removing
+        // bookkeeping is the only valid operation once the leased Shell generation changed.
         surfaces.Remove(surface);
     }
 
@@ -442,11 +547,14 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
     private static void PositionHidden(
         nint surface,
         DisplayBounds bounds,
-        NativeRect parentBounds)
+        NativeRect parentBounds,
+        DesktopAttachmentLease attachmentLease)
     {
         if (!DesktopNativeMethods.SetWindowPos(
                 surface,
-                DesktopNativeMethods.WindowBottom,
+                attachmentLease.PlacementKind == DesktopSurfacePlacementKind.BetweenAnchorAndBackdrop
+                    ? ToNativeHandle(attachmentLease.ZOrderAnchorWindowHandle)
+                    : DesktopNativeMethods.WindowBottom,
                 checked(bounds.X - parentBounds.Left),
                 checked(bounds.Y - parentBounds.Top),
                 bounds.Width,
@@ -459,6 +567,115 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
 
     private static nint ToNativeHandle(ulong handle) =>
         unchecked((nint)(long)handle);
+
+    private void ValidateAttachmentLease(DesktopAttachmentLease attachmentLease)
+    {
+        nint parent = ToNativeHandle(attachmentLease.ParentWindowHandle);
+        if (!DesktopNativeMethods.IsWindow(parent) ||
+            !shellGenerationValidator(attachmentLease))
+        {
+            throw new DesktopAttachPointUnavailableException(
+                "The desktop attachment lease is no longer valid for the current Shell generation.");
+        }
+
+        _ = DesktopNativeMethods.GetWindowThreadProcessId(parent, out uint parentProcessId);
+        if (parentProcessId == 0 ||
+            parentProcessId != attachmentLease.ShellGeneration.ShellProcessId)
+        {
+            throw new DesktopAttachPointUnavailableException(
+                "The desktop attachment parent no longer belongs to the leased Shell process.");
+        }
+
+        if (attachmentLease.PlacementKind != DesktopSurfacePlacementKind.BetweenAnchorAndBackdrop)
+        {
+            return;
+        }
+
+        nint anchor = ToNativeHandle(attachmentLease.ZOrderAnchorWindowHandle);
+        nint backdrop = ToNativeHandle(attachmentLease.BackdropWindowHandle);
+        _ = DesktopNativeMethods.GetWindowThreadProcessId(anchor, out uint anchorProcessId);
+        _ = DesktopNativeMethods.GetWindowThreadProcessId(backdrop, out uint backdropProcessId);
+        if (!DesktopNativeMethods.IsWindow(anchor) ||
+            !DesktopNativeMethods.IsWindow(backdrop) ||
+            DesktopNativeMethods.GetParent(anchor) != parent ||
+            DesktopNativeMethods.GetParent(backdrop) != parent ||
+            parentProcessId == 0 ||
+            parentProcessId != attachmentLease.ShellGeneration.ShellProcessId ||
+            anchorProcessId != parentProcessId ||
+            backdropProcessId != parentProcessId ||
+            !IsBeforeInSiblingZOrder(parent, anchor, backdrop))
+        {
+            throw new DesktopAttachPointUnavailableException(
+                "The Raised Desktop attachment lease is stale or its Shell anchors changed.");
+        }
+
+        ValidateNoCompetingDesktopSurface(anchor, backdrop);
+    }
+
+    private void ValidateNoCompetingDesktopSurface(nint anchor, nint backdrop)
+    {
+        for (nint current = DesktopNativeMethods.GetWindow(
+                anchor,
+                DesktopNativeMethods.GetWindowNext);
+            current != 0 && current != backdrop;
+            current = DesktopNativeMethods.GetWindow(current, DesktopNativeMethods.GetWindowNext))
+        {
+            ulong style = unchecked((ulong)DesktopNativeMethods.GetWindowLongPtr(
+                current,
+                DesktopNativeMethods.WindowLongStyle).ToInt64());
+            if (!surfaces.ContainsKey(current) &&
+                (style & DesktopNativeMethods.WindowStyleVisible) != 0)
+            {
+                throw new DesktopAttachPointUnavailableException(
+                    "CompetingDesktopSurface: another visible desktop Surface appeared " +
+                    "between DefView and the Raised Desktop backdrop.");
+            }
+        }
+    }
+
+    private static bool IsBeforeInSiblingZOrder(nint parent, nint before, nint after)
+    {
+        for (nint current = DesktopNativeMethods.GetTopWindow(parent);
+            current != 0;
+            current = DesktopNativeMethods.GetWindow(current, DesktopNativeMethods.GetWindowNext))
+        {
+            if (current == before)
+            {
+                return true;
+            }
+
+            if (current == after)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private static void PrepareBackdrop(DesktopAttachmentLease attachmentLease)
+    {
+        if (attachmentLease.PlacementKind != DesktopSurfacePlacementKind.BetweenAnchorAndBackdrop)
+        {
+            return;
+        }
+
+        if (!DesktopNativeMethods.SetWindowPos(
+                ToNativeHandle(attachmentLease.BackdropWindowHandle),
+                DesktopNativeMethods.WindowBottom,
+                0,
+                0,
+                0,
+                0,
+                DesktopNativeMethods.SetWindowPositionNoActivate |
+                    DesktopNativeMethods.SetWindowPositionNoMove |
+                    DesktopNativeMethods.SetWindowPositionNoSize))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not keep the Raised Desktop backdrop below LiveWall Surfaces.");
+        }
+    }
 
     private static nint WindowProcedure(nint window, uint message, nuint wParam, nint lParam) =>
         DesktopNativeMethods.DefWindowProc(window, message, wParam, lParam);
@@ -474,4 +691,9 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         Active,
         Retired,
     }
+
+    private sealed record TrackedDesktopSurfaceWindow(
+        nint Window,
+        DesktopSurfaceWindowState State,
+        DesktopAttachmentLease AttachmentLease);
 }

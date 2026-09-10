@@ -6,6 +6,8 @@ Host 为每个 Renderer 会话创建仅当前用户可访问的 `LOCAL\` Named P
 
 Renderer 启动后先发带一次性认证密钥的 `Hello`，Host 以固定时间比较校验密钥、主版本和能力，再发 `Initialize`。握手未完成前除 `Shutdown` 外的控制命令均应拒绝；认证失败或握手超时直接关闭会话。
 
+Host 侧协议适配器只有在收到并验证 `Initialized` 后，才能把对应 `IRendererSession` 返回给 Application。Application 不发送或接收 `Hello`、`Initialize`、`Initialized` 等 wire 握手消息；这些细节由 Host 负责的 Application ↔ Contracts 适配层封装。首次加载顺序固定为 `AttachSurface → SurfaceAttached → LoadWallpaper → ContentLoaded → FirstFramePresented`；Explorer generation 恢复时，在内容仍驻留于同一 Renderer 的前提下，顺序为新的 `AttachSurface → SurfaceAttached → FirstFramePresented`。任何乱序、错误 session/generation 或超时都必须失败关闭，不能用最终出现的 `FirstFramePresented` 掩盖缺失的中间确认。
+
 ## Envelope
 
 ```json
@@ -55,7 +57,11 @@ Windows Raised Desktop 诊断已经证明，窗口父子关系和 Z-order 结构
 - 只有 Host 必须接收或合成 Renderer 的共享纹理、交换链句柄、同步 fence 等 GPU 资源，或者跨进程对象不再是 Host 容器 HWND 时，协议才升级 minor 版本，新增能力协商和强类型 `SurfaceBinding` discriminated payload，并同步 JSON Schema、兼容性和往返契约测试；
 - 不得通过继续复用 `windowHandle` 字段承载不同对象或隐式切换呈现后端。
 
-下一项门禁是隔离的 Renderer-child DirectComposition 探针：诊断父进程创建生产等价 Host Surface，独立 Renderer 辅助进程收到现有 `AttachSurface` 后创建自有 child HWND 和 DComp target/交换链。只有该路径不可见且证据表明必须跨进程共享 GPU 资源时，才进入协议 1.1 设计。在此之前协议 v1 保持不变，本轮不修改现有 wire format。
+隔离的 Renderer-child DirectComposition 探针已经证明：独立 Renderer 可以只接收现有 `AttachSurface.windowHandle`，在 Host 容器内创建并拥有 child HWND、DComp target 和交换链，产生真实可见首帧，并在正常退出、父进程取消、Renderer 崩溃和 Explorer generation 变化后正确清理或重附着。因此 `HwndChild` binding 保留为协议 v1 当前路径，不修改 wire format、协议版本或 JSON Schema。
+
+`RendererChildProbe` 仍是测试 Renderer，不是 Video/Web 产品 Renderer，但现已覆盖一次性令牌 `Hello`、`Initialize → Initialized`、`AttachSurface → SurfaceAttached`、`LoadWallpaper → ContentLoaded → FirstFramePresented`、递增 generation 的再次附着，以及 `Shutdown → ShutdownCompleted`。Host 正式会话已经实现单一接收泵、事件缓冲、阶段超时、session/generation 校验、未知事件和重复 messageId 拒绝，并已接入显式产品候选链。以上属于既有 v1 契约的实现与验证，不构成协议 1.1 变更；交互式桌面呈现和完整异常矩阵仍是独立的生产验收门禁。
+
+实现所有权固定如下：Infrastructure 只提供受限 Named Pipe、长度帧、一次性凭据等通用传输原语；Host/Orchestration 拥有进程启动、握手、Application 命令/事件与 Contracts DTO 映射、状态机和超时；Platform.Windows 不处理 Renderer IPC；Video/Web Renderer 只依赖 Contracts 并各自拥有引擎和子 HWND。诊断工具可复用 Infrastructure 传输代码，但不得被产品组合根直接当作 Renderer 实现。
 
 ## 权限与校验
 

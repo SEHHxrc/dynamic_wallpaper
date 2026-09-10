@@ -41,7 +41,7 @@ public sealed class WindowsDesktopHostTests
             new DesktopAttachPointUnavailableException("raised unavailable"));
         FakeDesktopAdapter fallback = new(
             supported: true,
-            new DesktopAttachPoint(42, "legacy"));
+            Lease(42));
         DesktopHostAdapterSelector selector = new([preferred, fallback]);
 
         SelectedDesktopAdapter selected = await selector.DiscoverAsync(
@@ -49,7 +49,7 @@ public sealed class WindowsDesktopHostTests
             CancellationToken.None);
 
         selected.Adapter.Should().BeSameAs(fallback);
-        selected.AttachPoint.AdapterId.Should().Be("legacy");
+        selected.AttachmentLease.Capability.AdapterId.Should().Be("legacy");
         preferred.DiscoverCount.Should().Be(1);
         fallback.DiscoverCount.Should().Be(1);
     }
@@ -59,7 +59,7 @@ public sealed class WindowsDesktopHostTests
     {
         FakeDesktopAdapter fallback = new(
             supported: true,
-            new DesktopAttachPoint(42, "legacy"));
+            Lease(42));
         DesktopHostAdapterSelector selector = new([
             new RaisedDesktopAdapter(),
             fallback,
@@ -70,7 +70,41 @@ public sealed class WindowsDesktopHostTests
             CancellationToken.None);
 
         selected.Adapter.Should().BeSameAs(fallback);
-        selected.AttachPoint.AdapterId.Should().Be("legacy");
+        selected.AttachmentLease.Capability.AdapterId.Should().Be("legacy");
+    }
+
+    [Fact]
+    public void RaisedDesktopProductionAdapterIsDisabledWhileAllowlistIsEmpty()
+    {
+        RaisedDesktopAdapter adapter = new();
+
+        adapter.IsSupported(ShellSnapshot()).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task RaisedDesktopDiagnosticOverrideReturnsAnInternalLease()
+    {
+        DesktopAttachmentLease lease = DesktopAttachmentLease.CreateRaised(
+            RaisedDesktopAdapter.AdapterId,
+            parentWindowHandle: 10,
+            zOrderAnchorWindowHandle: 11,
+            backdropWindowHandle: 12,
+            shellWindowHandle: 10,
+            shellProcessId: 20,
+            structuralFingerprint: "fingerprint");
+        RaisedDesktopAdapter adapter = new(
+            allowUnvalidatedBuild: true,
+            _ => Task.FromResult(lease));
+
+        adapter.IsSupported(ShellSnapshot()).Should().BeTrue();
+        DesktopAttachmentLease discovered = await adapter.DiscoverAsync(CancellationToken.None);
+
+        discovered.Should().BeSameAs(lease);
+        discovered.Capability.Should().Be(new DesktopAttachmentCapability(
+            RaisedDesktopAdapter.AdapterId,
+            "raised-progman-no-redirection",
+            "hwnd-child-v1"));
+        discovered.StructuralFingerprint.Should().Be("fingerprint");
     }
 
     [Fact]
@@ -88,8 +122,8 @@ public sealed class WindowsDesktopHostTests
         ]);
         FakeDesktopAdapter adapter = new(
             supported: true,
-            new DesktopAttachPoint(100, "legacy"),
-            new DesktopAttachPoint(200, "legacy"));
+            Lease(100),
+            Lease(200));
         FakeDesktopSurfaceFactory surfaceFactory = new();
         await using WindowsDesktopHost host = new(
             ShellSnapshot(),
@@ -115,16 +149,18 @@ public sealed class WindowsDesktopHostTests
         await host.DestroySurfaceAsync(surface.Id, CancellationToken.None);
 
         initial.Revision.Should().Be(1);
-        initial.AttachPoints.Should().ContainSingle().Which.WindowHandle.Should().Be(100);
+        initial.Attachments.Should().ContainSingle()
+            .Which.AdapterId.Should().Be("legacy");
         recovered.Revision.Should().Be(2);
-        recovered.AttachPoints.Should().ContainSingle().Which.WindowHandle.Should().Be(200);
+        recovered.Attachments.Should().ContainSingle()
+            .Which.AdapterId.Should().Be("legacy");
         surface.WindowHandle.Should().Be(1000);
         surfaceFactory.Created.Should().ContainSingle();
         surfaceFactory.Replacements.Should().ContainSingle();
         surfaceFactory.Replacements[0].Provisional.Should().Equal(1000UL);
         surfaceFactory.Replacements[0].Replaced.Should().BeEmpty();
         surfaceFactory.Destroyed.Should().Equal(1000UL);
-        adapter.RecoverCount.Should().Be(1);
+        surfaceFactory.Created[0].AttachmentLease.ParentWindowHandle.Should().Be(100);
     }
 
     [Fact]
@@ -142,7 +178,7 @@ public sealed class WindowsDesktopHostTests
         ]);
         FakeDesktopAdapter adapter = new(
             supported: true,
-            new DesktopAttachPoint(100, "legacy"));
+            Lease(100));
         await using WindowsDesktopHost host = new(
             ShellSnapshot(),
             new DesktopHostAdapterSelector([adapter]),
@@ -175,7 +211,7 @@ public sealed class WindowsDesktopHostTests
         ]);
         FakeDesktopAdapter adapter = new(
             supported: true,
-            new DesktopAttachPoint(100, "legacy"));
+            Lease(100));
         FakeDesktopSurfaceFactory factory = new();
         await using WindowsDesktopHost host = new(
             ShellSnapshot(),
@@ -204,6 +240,13 @@ public sealed class WindowsDesktopHostTests
             RaisedDesktopEnabled: true,
             UpdateBuildRevision: 1234);
 
+    private static DesktopAttachmentLease Lease(ulong parentWindowHandle) =>
+        DesktopAttachmentLease.CreateLegacy(
+            "legacy",
+            parentWindowHandle,
+            shellWindowHandle: 1,
+            shellProcessId: 1);
+
     private sealed class FakeDesktopAdapter : IDesktopHostAdapter
     {
         private readonly bool supported;
@@ -217,28 +260,19 @@ public sealed class WindowsDesktopHostTests
 
         public int DiscoverCount { get; private set; }
 
-        public int RecoverCount { get; private set; }
-
         public bool IsSupported(WindowsShellSnapshot snapshot) => supported;
 
-        public Task<DesktopAttachPoint> DiscoverAsync(CancellationToken cancellationToken)
+        public Task<DesktopAttachmentLease> DiscoverAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             DiscoverCount++;
             object result = discoveries.Dequeue();
             return result switch
             {
-                DesktopAttachPoint point => Task.FromResult(point),
-                Exception exception => Task.FromException<DesktopAttachPoint>(exception),
+                DesktopAttachmentLease lease => Task.FromResult(lease),
+                Exception exception => Task.FromException<DesktopAttachmentLease>(exception),
                 _ => throw new InvalidOperationException("Unexpected fake discovery result."),
             };
-        }
-
-        public Task RecoverAsync(CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            RecoverCount++;
-            return Task.CompletedTask;
         }
     }
 
@@ -246,11 +280,13 @@ public sealed class WindowsDesktopHostTests
     {
         private ulong nextHandle = 1000;
 
-        public List<(SurfaceId Id, SurfaceRequest Request, DesktopAttachPoint AttachPoint)> Created { get; } = [];
+        public List<(SurfaceId Id, SurfaceRequest Request, DesktopAttachmentLease AttachmentLease)> Created { get; } = [];
 
         public List<(IReadOnlyList<ulong> Provisional, IReadOnlyList<ulong> Replaced)> Replacements { get; } = [];
 
         public List<ulong> Destroyed { get; } = [];
+
+        public List<ulong> Abandoned { get; } = [];
 
         public async IAsyncEnumerable<DesktopWindowSignal> ReadSignalsAsync(
             [System.Runtime.CompilerServices.EnumeratorCancellation]
@@ -264,11 +300,11 @@ public sealed class WindowsDesktopHostTests
         public Task<ulong> CreateAsync(
             SurfaceId id,
             SurfaceRequest request,
-            DesktopAttachPoint attachPoint,
+            DesktopAttachmentLease attachmentLease,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Created.Add((id, request, attachPoint));
+            Created.Add((id, request, attachmentLease));
             return Task.FromResult(nextHandle++);
         }
 
@@ -288,6 +324,13 @@ public sealed class WindowsDesktopHostTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Destroyed.Add(surfaceHandle);
+            return Task.CompletedTask;
+        }
+
+        public Task AbandonAsync(ulong surfaceHandle, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Abandoned.Add(surfaceHandle);
             return Task.CompletedTask;
         }
 

@@ -19,15 +19,8 @@ public interface IDesktopHost
         CancellationToken cancellationToken);
 
     Task DestroySurfaceAsync(SurfaceId surfaceId, CancellationToken cancellationToken);
-}
 
-public interface IDesktopHostAdapter
-{
-    bool IsSupported(WindowsShellSnapshot snapshot);
-
-    Task<DesktopAttachPoint> DiscoverAsync(CancellationToken cancellationToken);
-
-    Task RecoverAsync(CancellationToken cancellationToken);
+    Task AbandonSurfaceAsync(SurfaceId surfaceId, CancellationToken cancellationToken);
 }
 
 public interface IDisplayTopologySource
@@ -39,9 +32,14 @@ public interface IDisplayTopologySource
 
 public readonly record struct SurfaceId(string Value);
 
-public sealed record DesktopTopology(long Revision, IReadOnlyList<DesktopAttachPoint> AttachPoints);
+public sealed record DesktopTopology(
+    long Revision,
+    IReadOnlyList<DesktopAttachmentCapability> Attachments);
 
-public sealed record DesktopAttachPoint(ulong WindowHandle, string AdapterId);
+public sealed record DesktopAttachmentCapability(
+    string AdapterId,
+    string PresentationKind,
+    string RendererBinding);
 
 public sealed record SurfaceRequest(
     IReadOnlyList<DisplayId> DisplayIds,

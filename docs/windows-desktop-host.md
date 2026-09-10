@@ -6,13 +6,13 @@
 
 | 事项 | 当前状态 | 持续约束 |
 |---|---|---|
-| Raised Desktop 能力 | 隔离诊断已实现；两种 GDI 失败，无边框 Host-owned DComp 单屏呈现和 Explorer generation 重建通过；生产 Adapter 仍主动失败 | P1 / Stage B 关键路径；Renderer-child binding 与完整矩阵、独立 allowlist 完成前不得启用 |
+| Raised Desktop 能力 | 两种 GDI 失败；无边框 Host-owned DComp、独立 Renderer-child v1 `HwndChild` binding、同 Renderer 跨 Shell generation 功能恢复均通过；Platform 内部 Lease/Factory 已接线；生产 Adapter 因空 allowlist 不参与选择 | P1 / Stage B 关键路径；正式 Renderer 会话、完整矩阵、Shell mutation 策略和独立 allowlist 完成前不得启用 |
 | Surface 窗口线程所有权 | 已实现，待真实验收 | 使用 Host 进程级专用 Window Dispatcher，所有自有 HWND 操作封送到该线程 |
 | 首帧 Surface 切换 | 已实现，待真实验收 | `CreateSurfaceAsync` 创建隐藏 provisional Surface；由批量 `ReplaceSurfacesAsync` 显式提交 |
-| Explorer/Shell 恢复 | 产品恢复代码已实现、自动验证通过；Host-owned DComp 诊断恢复已通过真实验收 | `TaskbarCreated` 为主信号、句柄/进程验证为后备；仍需用独立 Renderer 进程验证重建 Surface、重新 Attach 和首帧恢复 |
+| Explorer/Shell 恢复 | 成功路径已实现；独立 Renderer 同进程跨 generation 重附着、第二次首帧、层级与清理已自动及人工通过；失败分支已改为失效会话、generation-safe abandon、全新 Renderer/Surface 限次退避重建与最终熔断 | 功能恢复正向验收及失败策略自动门禁通过；真实 Explorer 组合故障矩阵仍待验收；显式终止 Explorer 的短暂黑屏不属于无缝恢复承诺 |
 | 桌面诊断入口 | 已实现，待矩阵验收 | 提供 Shell/Legacy 诊断及隔离 Raised Desktop 探针与色块；默认运行仍只读 |
 | Desktop/Display 防抖 | 已实现 | 固定为 350 ms，位于根架构允许的 300–500 ms 范围 |
-| Stage B 总体状态 | `In progress / Not accepted` | Host-owned DirectComposition 已通过单屏呈现和诊断级 Shell 恢复；Renderer-child、DPI、热插拔、多屏和生产接线尚未完成 |
+| Stage B 总体状态 | `In progress / Not accepted` | Lease/Factory、v1 `HwndChild` binding、正式 Renderer 会话、物理单屏短时以及 P1.6 双屏基础/90 秒长驻/10 次 process-cold/20 轮连续替换已通过；正式局部故障、双屏 Explorer、完整 DPI、热插拔、主屏切换、Shell mutation 和体验优化尚未完成 |
 
 ## 1. Shell 适配器边界
 
@@ -20,7 +20,7 @@ WorkerW/Progman/Raised Desktop 不是 LiveWall 可以依赖的公开动态壁纸
 
 当前状态：
 
-- `RaisedDesktopAdapter` 仅是占位符，`DiscoverAsync` 主动报告未验证；
+- `RaisedDesktopAdapter` 已能发现内部 Raised lease，但生产 `ValidatedBuilds` 为空，因此正常 Selector 不会选择它；
 - Adapter Selector 随后尝试 Legacy WorkerW；
 - Legacy WorkerW 已有发现和结构验证代码，但生产 `ValidatedBuilds` 为空，在真实桌面层级、Explorer 重启、DPI/热插拔矩阵验收完成前仍标记为 Experimental；
 - 当前完整 build `26200.9168` 在已验证适配器和现有 Legacy 请求参数下没有合规候选；隔离 Raised 诊断已有单屏正结果，但不改变 Legacy 结论，也不自动形成生产支持；
@@ -53,22 +53,24 @@ StructuralCandidate
 - `PresentationProbe` 必须用拟投入生产的内容提交类型证明实际像素可见，并验证图标、任务栏和普通应用不被遮挡。
 - `RenderableDesktopAttachment` 才是适配器可以交给 Desktop Host 的能力；它必须绑定 adapter id、完整 build/UBR、结构指纹、当前 Shell generation、presentation kind 和已通过的验收矩阵。
 
-Platform.Windows 可以在一次 Shell generation 内持有仅限进程内使用的临时 attachment lease，例如：
+Platform.Windows 已在一次 Shell generation 内持有仅限进程内使用的 attachment lease，核心形状为：
 
 ```csharp
-internal sealed record DesktopAttachmentLease(
-    string AdapterId,
-    string StructuralFingerprint,
-    long ShellGeneration,
-    DesktopPresentationKind PresentationKind,
-    nint ParentWindow,
-    nint ZOrderAnchorWindow,
-    nint? BackdropWindow);
+internal sealed record DesktopAttachmentLease
+{
+    DesktopAttachmentCapability Capability;
+    DesktopSurfacePlacementKind PlacementKind;
+    string StructuralFingerprint;
+    DesktopShellGeneration ShellGeneration;
+    ulong ParentWindowHandle;
+    ulong ZOrderAnchorWindowHandle;
+    ulong BackdropWindowHandle;
+}
 ```
 
-该形状用于明确所有权和调用关系，不是本轮要求立即实现或冻结的公开接口。Shell-owned HWND 不得进入 Domain、持久存储、allowlist 或跨进程协议；Renderer Protocol v1 传递的是 LiveWall Host 自有容器 HWND，不是 Progman/DefView/WorkerW。Explorer/Shell generation 变化后 lease 必须整体失效并重新发现。现有 Application `DesktopAttachPoint(WindowHandle, AdapterId)` 仅能表达单父窗口的过渡能力，不能承载生产 Raised Desktop 所需的 Z-order anchor、Shell generation 与 presentation kind，因此当前不得用它把 Raised 结构候选升级为生产附着。
+该类型及 `IDesktopHostAdapter` 均为 Platform.Windows 内部接口。Application 的 `DesktopTopology` 只返回不含句柄的 `DesktopAttachmentCapability(AdapterId, PresentationKind, RendererBinding)`；Shell-owned HWND 不得进入 Domain、持久存储、allowlist 或跨进程协议。Renderer Protocol v1 传递的是 LiveWall Host 自有容器 HWND，不是 Progman/DefView/WorkerW。Explorer/Shell generation 变化后 lease 整体失效并重新发现；替换流程只激活新 generation 的 provisional Surface，把旧 Surface 记为 retired，不再对旧 HWND 执行显隐、换父级或复用操作。
 
-这里必须区分两个正交维度：attachment presentation 描述 Platform.Windows 如何把 Host Surface 放入 Shell 可见合成路径；Renderer binding 描述 Host 和独立 Renderer 进程之间传递什么。Host-owned DComp 探针已经验证前者的一条可见路径，但尚未验证协议 v1 的 `HwndChild`：Renderer 在 Host 容器内创建自有 child HWND，并在该 child 上绑定自有 DComp target/交换链。该内部图形实现不要求协议升级；只有跨进程需要传递 HWND 之外的共享纹理、交换链句柄、同步 fence 等 GPU 对象时，才新增强类型 binding。
+这里必须区分两个正交维度：attachment presentation 描述 Platform.Windows 如何把 Host Surface 放入 Shell 可见合成路径；Renderer binding 描述 Host 和独立 Renderer 进程之间传递什么。Host-owned DComp 探针已经验证前者的一条可见路径；独立 Renderer-child 探针也已验证协议 v1 的 `HwndChild` 结构、IPC 事件顺序、真实像素与正常/取消/崩溃清理：Renderer 在 Host 容器内创建自有 child HWND，并在该 child 上绑定自有 DComp target/交换链。同 Renderer PID 跨 Explorer generation 的第二次 Attach/FirstFrame、干净环境 10 秒持续层级复验和人工恢复序列均已通过；竞争程序自动插入时则明确失败关闭。Shell 重启期间的短暂黑屏属于旧 generation 已销毁而新 generation 尚未可附着的状态，不等同于产品无缝恢复验收。该内部图形实现不要求协议升级；只有跨进程需要传递 HWND 之外的共享纹理、交换链句柄、同步 fence 等 GPU 对象时，才新增强类型 binding。
 
 ## 2. 专用 Window Dispatcher
 
@@ -186,7 +188,7 @@ Microsoft 文档说明 Shell 创建任务栏时会广播注册字符串 `Taskbar
 
 `IsWindow` 只能作为提示，不能作为外部 HWND 身份证明：句柄可能在检查后销毁或被复用。验证必须重新枚举，并组合类名、进程、父子关系和当前适配器层级规则。若现有 Renderer 不支持重新附着或超时，再进入 Renderer 重启/熔断策略。
 
-当前实现使用隐藏顶级窗口接收 `TaskbarCreated`，按 350 ms 合并验证请求，并以 2 秒探针作为后备；Host 已处理恢复命令并执行上述重建路径。Host-owned DComp 诊断已经通过一次真实 Explorer generation 重建验收；独立 Renderer 重新附着、产品入口和 DPI 误触发场景仍未完成矩阵验收。
+当前实现使用隐藏顶级窗口接收 `TaskbarCreated`，按 350 ms 合并验证请求，并以 2 秒探针作为后备；Host 已处理恢复命令并执行上述重建路径。Host-owned DComp 与独立 Renderer 同进程跨 generation 重新附着均已通过真实功能恢复验收。产品级无缝恢复尚未宣称通过：旧 Shell generation 被显式销毁至新 generation 可用之间允许短暂黑屏，后续只能优化发现/重建延迟，不能违反 provisional 或 HWND generation 边界。
 
 ## 6. 诊断和 Stage B 完成门槛
 
@@ -252,19 +254,21 @@ Raised Desktop 全部入口与 Legacy 完全隔离。预检拒绝退出码为 5�
 - 诊断输出已经拆分为 `OwnedResourcesCleanup` 与 `ShellMutationRecovery`。LiveWall 自有 HWND 已销毁，但初次请求生成的 Shell WorkerW 仍然存在，因此整体 Shell mutation recovery 仍是 `CleanupIncomplete`；两个结论不得合并。
 - `--raised-desktop-presentation-probe non-layered-gdi` 已完成一次 5 秒运行并输出 `PresentationProbeCompleted`，但人工观察仍完全没有桌面变化，判定 `PresentationFailed`。该状态只表示探针执行完毕；人工失败后仍不是 `RenderableDesktopAttachment`。
 
-因此准确结论是“现有 Legacy 不支持；Raised Desktop 的 layered GDI 与 non-layered GDI presentation probe 均失败；无边框 Host-owned DirectComposition composition swap chain 已通过单屏呈现和 Explorer generation 重建诊断验收”。第一次 DComp 实验因从顶层窗口转换时残留 `WS_CAPTION`，交换链只覆盖客户区，造成上、左非客户区缺口；探针改为直接创建无边框 Progman 子窗口后，第二次实验已人工确认完整覆盖壁纸区域、图标位于其上且任务栏不受影响。恢复实验又确认旧/新 Shell PID 和核心 HWND 均不同、`generationChanged=True`、`rebuilt=True`，且新黄色 Surface 未遮挡任务栏。当前已有 1 条 Host-owned DComp 单屏 `RenderableDesktopAttachment` 诊断证据，但生产启用数量仍为 0；下一步不能修改 Legacy、直接使用 Progman 或立即启用生产 Raised Adapter：
+因此准确结论是“现有 Legacy 不支持；Raised Desktop 的 layered GDI 与 non-layered GDI presentation probe 均失败；无边框 Host-owned DirectComposition composition swap chain 已通过单屏呈现和 Explorer generation 重建诊断验收；独立 Renderer-child 协议 v1 binding 已通过单屏可见性、生命周期和跨 Shell generation 自动重附着门禁”。第一次 DComp 实验因从顶层窗口转换时残留 `WS_CAPTION`，交换链只覆盖客户区，造成上、左非客户区缺口；探针改为直接创建无边框 Progman 子窗口后，第二次实验已人工确认完整覆盖壁纸区域、图标位于其上且任务栏不受影响。当前已有 Host-owned DComp 与 Renderer-child 两类诊断证据，但生产启用数量仍为 0；下一步不能修改 Legacy、直接使用 Progman 或立即启用生产 Raised Adapter：
 
 1. 已实现不包含裸 HWND/PID 的 SHA-256 结构指纹和强类型拒绝理由；继续保持只输出证据、不自动修改 allowlist。
-2. 下一项 P1 门禁是隔离 Renderer-child DirectComposition 探针：诊断父进程创建无边框 Host Surface；独立 Renderer 辅助进程通过现有 `AttachSurface` 接收容器 HWND，在其中创建自有 child HWND，并把自有 DComp target/交换链绑定到 child。父进程必须验证 child 的 parent、独立 PID、bounds 和生命周期；人工确认真实像素、图标与任务栏层级。
-3. 探针的 Host Surface 必须显式使用 Raised 结构规则：以 Progman 为 parent，以 DefView 为 Z-order anchor、WorkerW 为 backdrop，并采用已验证的无边框/no-redirection profile。当前 `NativeDesktopSurfaceFactory` 只接收单个 parent HWND，并以 `HWND_BOTTOM` 创建/激活通用 child，不能视为生产等价 Raised 实现；探针成功也不会自动使该 Factory 或 Adapter 合规。
-4. 若 Renderer-child 路径通过，继续使用 Renderer Protocol v1；随后实现 Platform.Windows 内部 `DesktopAttachmentLease`，让 Raised Surface Factory 在内部消费 parent/anchor/backdrop/generation，而 Application 与 Renderer 仍只看到 LiveWall 自有容器 HWND。
-5. 再验证同一 Renderer 进程在 Explorer generation 变化后释放旧 child/target、接收新 `AttachSurface`、创建全新 child/target 并再次产生 `FirstFramePresented`，不得复用旧 HWND，也应尽量保持播放状态。
-6. 只有 Renderer-child 路径失败且证据表明 Host 必须合成 Renderer 帧时，才进入共享纹理/交换链 handle、fence、资源所有权和协议 1.1 的设计；不能因内部使用 DirectComposition 就升级协议。
-7. 上述 binding 与 Factory 边界关闭后，再执行 DPI、热插拔、多屏、异常退出和产品 Host/Renderer 恢复矩阵；Shell-owned HWND 只属于单次 Shell generation，不能进入持久 allowlist。
+2. 隔离 Renderer-child DirectComposition 探针已通过：父进程创建无边框 Host Surface；独立 Renderer 辅助进程仅通过现有 `AttachSurface` 接收容器 HWND，在其中创建并拥有 child HWND、DComp target 和交换链；parent、独立 PID、bounds、事件顺序、真实像素与生命周期均已验证。测试 Renderer 现已补齐 `Hello → Initialize → Initialized`、首次 Attach/Load/ContentLoaded/FirstFrame、再次 Attach 与 ShutdownCompleted。
+3. 生产形态 Host Surface 已使用 Raised 结构规则：内部 Lease 记录 Progman parent、DefView Z-order anchor、WorkerW backdrop、结构指纹与 Shell generation；`NativeDesktopSurfaceFactory` 使用无边框/no-redirection profile 创建 hidden provisional container，并在激活时显式维持 `DefView > LiveWall > WorkerW`。受控窗口自动测试已覆盖该行为，但不替代真实 Shell 矩阵。
+4. Renderer Protocol v1 `HwndChild` binding 与正式控制面状态机均已接线并通过自动验证；Application 只接收无 Shell HWND 的能力描述，Renderer 只接收 LiveWall 容器 HWND。Protocol/Schema 不升级、不修改；交互式产品候选已在双屏环境的主屏单 Surface 上连续两次完成人工首帧验收。
+5. 同一 Renderer 进程在 Explorer generation 变化后释放旧 child/target、接收新 `AttachSurface`、创建全新 child/target 并再次产生 `FirstFramePresented` 的自动门禁已通过，未复用旧 HWND；增强的每秒持续层级复验发现第三方 `mpv` 自动恢复并抢占 DefView 后第一位置，因此必须在无竞争桌面 Surface 的环境重测，不能实现周期性 Z-order 争抢作为规避。产品接线后还需验证播放状态保持。
+6. 当前不进入共享纹理/交换链 handle、fence、资源所有权和协议 1.1 设计；只有未来证据表明 Host 必须合成 Renderer 帧或跨进程对象不再是容器 HWND 时才重开该决策，不能因内部使用 DirectComposition 就升级协议。
+7. binding、Factory 与正式 Renderer v1 会话边界已经关闭；显式诊断开关也已接通真实 Host command loop / SessionCoordinator → Adapter → Lease → Native Factory → Renderer v1 产品候选链。恢复失败后的 previous Surface 回附已经删除，generation-safe abandon、全新会话退避重建和预算耗尽熔断已自动验证。每个 Apply generation 具有不可变时间线、强类型终态和按 Surface 数量推导的 deadline；P1.5.1 又将该 deadline lease 与长期活动 Session 解耦。物理单屏短时补测以及 P1.6 双屏 5 秒、90 秒、10 次 process-cold 和同一 Host 20 轮连续替换现均已通过。下一步是正式进程局部故障、双屏 Explorer generation 和显示拓扑重规划矩阵。Shell-owned HWND 只属于单次 Shell generation，不能进入持久 allowlist。
+   P1.6 已增加 schema 1.0 结构化单次结果、直接启动 Release 可执行文件且不补跑失败的 process-cold 批次驱动、产品候选专用 soak，以及支持显示器集合的同一 Host 串行 Apply/Replace/retirement 循环。真实双屏 90 秒 soak、10/10 次 process-cold 和 20 轮同 Host 循环均已通过。循环的 `all` 模式每代等待两个 FirstFrame 后只提交一次，下一代提交后等待上一代两个 Renderer 全部退休；实际得到 40 个 graceful retirement（38 个 Replacement、2 个 Shutdown），全部 ShutdownCompleted/Dispose/Surface cleanup 成功，无自有 HWND/新增 WorkerW。用户确认两屏同步橙黄交替、无黑屏或覆盖并正常恢复。process-cold 的 Apply/最后首帧/批次退休耗时范围分别为 1245.6–1285.2 ms、1227.7–1267.7 ms、43.8–80.3 ms；每轮 Shell generation 与显示拓扑均稳定。
+   双屏切片已实现显式 `primary / all / display-id` 选择和逐 Session 结果；`all` 由同一 generation 等待两个独立 FirstFrame 后执行一次批量 Replace，局部失败零提交并整批回收。多个 Renderer 的 retirement 并行启动、各自保留独立预算，Surface HWND 销毁仍由 Window Dispatcher 串行。`26200.9168 / session=7 / WinSta0\Default` 已在 200% 主屏和 150% 负坐标外接屏完成 5 秒基础、90 秒长驻、10 次 process-cold 及 20 轮连续替换；两屏同步、层级、40 个 Renderer retirement、自有资源和 Shell mutation 检查均通过。故障注入、双屏 Explorer、热插拔、主屏切换和更完整 DPI 矩阵仍未验收。
 8. LiveWall 自有资源清理与 Shell mutation recovery 分开验收；经用户授权的 Explorer 重启只证明 generation 恢复路径，不得把重启本身当成 Raised 请求可撤销能力。
 9. 兼容键至少包含完整 build revision/UBR、结构指纹、attachment presentation、Renderer binding 与验收矩阵，并继续要求运行时结构和实际呈现验证。基础 build `26200` 属于持续接收累积更新的 Windows 11 25H2 build 系列，单独使用它会把不同 Shell revision 错当成同一能力。
 
-该方向已经回答“Progman 内部是否存在可验证层级候选，以及 Host-owned DComp 是否可见”；接下来要回答“现有跨进程 `HwndChild` 是否也可见”。这仍是 Stage B 的 P1 诊断关键路径，不是直接启用产品 Adapter。由于相关桌面宿主行为不是公开动态壁纸 API，只有 Renderer binding 与完整矩阵也通过后，结论才能形成版本化、可撤销、失败关闭的生产适配器能力。
+该方向已经回答“Progman 内部是否存在可验证层级候选、Host-owned DComp 与跨进程 `HwndChild` 是否可见并可重附着、生产形态 Lease/Factory 能否保持边界，以及正式 v1 双屏产品候选能否长驻、冷启动和连续原子替换”。下一步是故障、双屏 Explorer 与显示拓扑重规划矩阵，不是直接写入 allowlist。由于相关桌面宿主行为不是公开动态壁纸 API，只有精确 build/UBR 的生产矩阵通过后，结论才能形成版本化、可撤销、失败关闭的生产适配器能力。
 
 ## 8. 官方依据
 

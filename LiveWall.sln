@@ -34,6 +34,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveWall.Windows.Integratio
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DesktopHostDiagnostics", "tools\DesktopHostDiagnostics\DesktopHostDiagnostics.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10C01}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RendererChildProbe", "tools\RendererChildProbe\RendererChildProbe.csproj", "{99AE7F73-11F0-49D8-B79B-70B25CE10C02}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -104,5 +106,9 @@ Global
 		{99AE7F73-11F0-49D8-B79B-70B25CE10C01}.Debug|x64.Build.0 = Debug|Any CPU
 		{99AE7F73-11F0-49D8-B79B-70B25CE10C01}.Release|x64.ActiveCfg = Release|Any CPU
 		{99AE7F73-11F0-49D8-B79B-70B25CE10C01}.Release|x64.Build.0 = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10C02}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10C02}.Debug|x64.Build.0 = Debug|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10C02}.Release|x64.ActiveCfg = Release|Any CPU
+		{99AE7F73-11F0-49D8-B79B-70B25CE10C02}.Release|x64.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

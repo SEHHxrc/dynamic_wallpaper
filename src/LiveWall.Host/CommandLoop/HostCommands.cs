@@ -1,9 +1,9 @@
+using LiveWall.Application.Sessions;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
+using LiveWall.Domain.Playback;
 using LiveWall.Domain.Sessions;
 using LiveWall.Domain.Wallpapers;
-using LiveWall.Application.Sessions;
-using LiveWall.Domain.Playback;
 using LiveWall.Host.Orchestration;
 
 namespace LiveWall.Host.CommandLoop;
@@ -44,7 +44,11 @@ internal sealed record ApplyPreparedCommand(long Generation, PreparedApply Prepa
 internal sealed record ApplyPreparationFailedCommand(
     long Generation,
     string ErrorCode,
-    string Message) : HostCommand;
+    string Message,
+    ApplyGenerationPhase Phase,
+    ApplyFailureReason FailureReason,
+    ApplyGenerationTerminalState TerminalState = ApplyGenerationTerminalState.Failed)
+    : HostCommand;
 
 internal sealed record ExplorerRestartedCommand : HostCommand;
 
@@ -56,6 +60,25 @@ internal sealed record DesktopRecoveryFailedCommand(
     long Generation,
     string ErrorCode,
     string Message) : HostCommand;
+
+internal sealed record RetryDesktopRecoveryCommand(
+    long ExpectedGeneration,
+    int Attempt) : HostCommand;
+
+internal sealed record DesktopRecoveryRebuildPreparedCommand(
+    long Generation,
+    int Attempt,
+    PreparedApply Prepared) : HostCommand;
+
+internal sealed record DesktopRecoveryRebuildFailedCommand(
+    long Generation,
+    int Attempt,
+    string ErrorCode,
+    string Message,
+    ApplyGenerationPhase Phase,
+    ApplyFailureReason FailureReason,
+    ApplyGenerationTerminalState TerminalState = ApplyGenerationTerminalState.Failed)
+    : HostCommand;
 
 internal sealed record GetHostStateCommand : HostCommand;
 

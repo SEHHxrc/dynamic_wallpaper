@@ -1,8 +1,8 @@
 using FluentAssertions;
 using LiveWall.Domain.Displays;
+using LiveWall.Domain.Playback;
 using LiveWall.Domain.Sessions;
 using LiveWall.Domain.Wallpapers;
-using LiveWall.Domain.Playback;
 
 namespace LiveWall.Domain.Tests;
 

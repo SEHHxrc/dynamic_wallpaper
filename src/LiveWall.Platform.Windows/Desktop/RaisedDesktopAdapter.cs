@@ -2,26 +2,49 @@ using LiveWall.Application.Sessions;
 
 namespace LiveWall.Platform.Windows.Desktop;
 
-public sealed class RaisedDesktopAdapter : IDesktopHostAdapter
+internal sealed class RaisedDesktopAdapter : IDesktopHostAdapter
 {
     public const string AdapterId = "raised-desktop-v1";
+    private static readonly string[] ValidatedBuilds = [];
+    private readonly bool allowUnvalidatedBuild;
+    private readonly Func<CancellationToken, Task<DesktopAttachmentLease>> discoverAttachment;
+
+    public RaisedDesktopAdapter()
+        : this(allowUnvalidatedBuild: false)
+    {
+    }
+
+    internal RaisedDesktopAdapter(bool allowUnvalidatedBuild)
+        : this(
+            allowUnvalidatedBuild,
+            cancellationToken => RaisedDesktopDiagnostics.DiscoverAttachmentLeaseAsync(
+                AdapterId,
+                snapshotObserver: null,
+                cancellationToken))
+    {
+    }
+
+    internal RaisedDesktopAdapter(
+        bool allowUnvalidatedBuild,
+        Func<CancellationToken, Task<DesktopAttachmentLease>> discoverAttachment)
+    {
+        this.allowUnvalidatedBuild = allowUnvalidatedBuild;
+        this.discoverAttachment = discoverAttachment ??
+            throw new ArgumentNullException(nameof(discoverAttachment));
+    }
 
     public bool IsSupported(WindowsShellSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        return snapshot.RaisedDesktopEnabled;
+        return snapshot.RaisedDesktopEnabled &&
+            (allowUnvalidatedBuild ||
+                (snapshot.HasCompleteBuildIdentity &&
+                    ValidatedBuilds.Contains(snapshot.FullBuild, StringComparer.Ordinal)));
     }
 
-    public Task<DesktopAttachPoint> DiscoverAsync(CancellationToken cancellationToken)
+    public Task<DesktopAttachmentLease> DiscoverAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromException<DesktopAttachPoint>(
-            new DesktopAttachPointUnavailableException(
-                "Raised Desktop attach-point discovery has not been validated for this shell build."));
-    }
-
-    public async Task RecoverAsync(CancellationToken cancellationToken)
-    {
-        _ = await DiscoverAsync(cancellationToken).ConfigureAwait(false);
+        return discoverAttachment(cancellationToken);
     }
 }

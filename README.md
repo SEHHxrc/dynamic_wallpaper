@@ -44,9 +44,15 @@ Bootstrap 还会生成被 Git 忽略的 `.vscode/settings.json`，让 C# 与 C# 
 
 ## 当前边界
 
-当前已实现专用 STA Window Dispatcher、隐藏 provisional Surface、批量 `ReplaceSurfacesAsync`、以 `TaskbarCreated` 为主信号并按 350 ms 防抖的 Shell 失效检测，以及由 Host 驱动的 Surface 重建式恢复。`DesktopHostDiagnostics` 已提供 `--shell-topology`、Legacy `--color-block`，以及隔离的 `--raised-desktop-probe`/`--raised-desktop-color-block`；默认运行仍只读。上述机制已有自动化测试，但尚未通过支持矩阵中的完整 Explorer、DPI、热插拔和多屏验收。
+当前已实现专用 STA Window Dispatcher、隐藏 provisional Surface、批量 `ReplaceSurfacesAsync`、以 `TaskbarCreated` 为主信号并按 350 ms 防抖的 Shell 失效检测，以及由 Host 驱动的 Surface 重建式恢复。`DesktopHostDiagnostics` 已提供 `--shell-topology`、Legacy `--color-block`，以及隔离的 Raised/Desktop 产品候选诊断；默认运行仍只读。双屏基础、长驻、process-cold 和连续替换已经通过，但完整 Explorer、故障注入、DPI 范围、热插拔和显示拓扑重规划矩阵尚未完成。
 
-`RaisedDesktopAdapter` 仍是主动失败的占位实现；Legacy WorkerW 与 Raised Desktop 的生产 allowlist 均为空。更准确的当前结论是：完整 build `26200.9168` 在现有 Legacy 参数下不受支持；隔离 Raised Desktop 探针已证明 `0x0D/0x01` 可生成结构合规的 Progman 子 WorkerW。无边框 Host-owned DirectComposition composition swap chain 已通过单屏呈现和 Explorer generation 重建诊断验收：新旧 Shell PID/HWND 不复用，新 Surface 完整覆盖壁纸区域、桌面图标位于其上且任务栏不受影响。下一项门禁是独立 Renderer 在 Host 容器内创建 child HWND 和自有 DComp target/交换链；该路径通过则保留 Renderer Protocol v1，不能仅因使用 DirectComposition 就升级协议。DPI、热插拔、多屏、产品恢复和 Shell mutation recovery 仍未闭环，因此不能启用生产适配器或 allowlist。Stage B 状态保持 `In progress / Not accepted`。详细区分见 [`docs/implementation-status.md`](docs/implementation-status.md) 和 [ADR-008](docs/adr/008-desktop-attachment-capability-and-presentation.md)。
+Legacy WorkerW 与 Raised Desktop 的生产 allowlist 均为空，因此生产 Selector 会失败关闭，完整 build `26200.9168` 仍不得标记为已支持。Raised 的单屏 DirectComposition、独立 Renderer-child 协议 v1 `HwndChild` binding、正常/取消/崩溃清理，以及同一 Renderer 跨 Explorer generation 重附着已经通过诊断和人工验收；功能恢复成立，但显式终止 Explorer 时的短暂黑屏不属于产品级无缝恢复承诺。正式 Renderer v1 会话和显式产品候选链已经接线并通过自动验证；主屏单 Surface 的短时物理单屏候选已经通过。P1.6 的双屏 90 秒长驻、10/10 次 process-cold 以及同一 Host 20 轮 Apply/Replace/retirement 均已在 `WinSta0\Default` 自动与人工通过。此前样本继续保留为历史 `UnclassifiedTimeout`，不能事后归因；P1.6 通过不替代 Explorer、热插拔和异常矩阵。
+
+双屏候选代码现已支持显式 `--target-display primary|all|<display-id>`，并为每个显示器返回独立 Session/Surface/retirement 结果。`all` 必须等待全部 FirstFrame 后执行一次批量 Replace；任一屏失败会整批回收。`26200.9168 / WinSta0\Default` 已在 200% 主屏与 150% 负坐标外接屏完成真实双屏候选、90 秒长驻、10/10 次 process-cold 和同一 Host 20 轮连续替换验收；两屏同步完整显示并恢复，图标、任务栏和普通程序层级正确，40 个 Renderer 全部优雅退休且无自有 HWND/新增 WorkerW。该证据关闭 P1.6，但不替代局部故障、Explorer、热插拔、主屏切换和更完整 DPI 矩阵。
+
+同 Host 连续候选入口也已支持 `--target-display all`：每代双屏首帧齐备后原子 Replace，下一代提交后等待上一代两个 Renderer 全部退休，并按 generation 在橙色/黄色间交替。真实 20 轮已完成：两屏全程同步交替、无黑屏或覆盖并正常恢复，40 个 Renderer 全部优雅退休，无自有 HWND 或新增 WorkerW。
+
+Platform.Windows 已落地内部 `DesktopAttachmentLease` 和 Raised Surface Factory 接线：Shell parent、DefView anchor、WorkerW backdrop、结构指纹和 generation 不再泄漏到 Application 或 Renderer；Application 只收到无 HWND 的能力描述，Renderer 仍只收到 LiveWall 自有容器 HWND。跨 generation 成功替换不会显隐、换父级或复用旧 HWND。恢复失败也不再把 Renderer 附回 previous Surface：Host 会原子失效活动会话、保留 Assignment、放弃旧及 provisional generation 记录，并以全新 Renderer/Surface 限次退避重建；预算耗尽后失败关闭，用户显式 Apply 可开启新的恢复尝试。Apply deadline 已与活动 Session 生命周期解耦：提交终态释放 deadline lease，正常替换/退出采用独立 Renderer retirement budget，并分别报告 graceful Shutdown 与自有资源清理。Raised 生产 Adapter 在精确 build/UBR allowlist、DPI、热插拔、多屏、完整恢复异常矩阵及 Shell mutation recovery 完成前仍保持禁用；Stage B 状态继续为 `In progress / Not accepted`。详细区分见 [`docs/implementation-status.md`](docs/implementation-status.md) 和 [ADR-008](docs/adr/008-desktop-attachment-capability-and-presentation.md)。
 
 ## 边界检查
 

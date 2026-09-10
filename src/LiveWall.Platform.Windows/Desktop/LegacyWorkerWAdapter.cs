@@ -5,7 +5,7 @@ using LiveWall.Platform.Windows.NativeMethods;
 
 namespace LiveWall.Platform.Windows.Desktop;
 
-public sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
+internal sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
 {
     public const string AdapterId = "legacy-workerw-v1";
     private static readonly string[] ValidatedBuilds = [];
@@ -28,7 +28,7 @@ public sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
                 ValidatedBuilds.Contains(snapshot.FullBuild, StringComparer.Ordinal));
     }
 
-    public Task<DesktopAttachPoint> DiscoverAsync(CancellationToken cancellationToken)
+    public Task<DesktopAttachmentLease> DiscoverAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         nint progman = DesktopNativeMethods.FindWindow("Progman", null);
@@ -45,12 +45,12 @@ public sealed class LegacyWorkerWAdapter : IDesktopHostAdapter
                 "A WorkerW window behind the desktop icons did not satisfy the process, ownership, DefView, and desktop-bounds rules.");
         }
 
-        return Task.FromResult(new DesktopAttachPoint(ToPublicHandle(worker), AdapterId));
-    }
-
-    public async Task RecoverAsync(CancellationToken cancellationToken)
-    {
-        _ = await DiscoverAsync(cancellationToken).ConfigureAwait(false);
+        _ = DesktopNativeMethods.GetWindowThreadProcessId(progman, out uint shellProcessId);
+        return Task.FromResult(DesktopAttachmentLease.CreateLegacy(
+            AdapterId,
+            ToPublicHandle(worker),
+            ToPublicHandle(progman),
+            shellProcessId));
     }
 
     private static void RequestWorkerWindow(nint progman)

@@ -65,6 +65,7 @@ Renderer events ------HostCommand-------> |
 - ProjectReference 方向符合上表；
 - Domain/Contracts 不引用其他 LiveWall 程序集；
 - Renderer/UI 只引用 Contracts；
+- Renderer 会话的 wire 握手与 Application 映射位于 Host；`IRendererProvider.CreateAsync` 只返回已经完成 Hello/Initialize/Initialized 的会话，Platform.Windows 不得处理 Renderer IPC；
 - `DllImport` / `LibraryImport` 只出现在允许的原生边界目录；
 - Wallpaper Engine 命名空间不出现在 Renderer；
 - 跨进程公开 DTO 可被 System.Text.Json 往返序列化。

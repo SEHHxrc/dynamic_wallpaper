@@ -35,6 +35,7 @@ internal static class DesktopNativeMethods
     internal const uint GetWindowOwner = 4;
     internal const int UserObjectName = 2;
     internal const int ErrorClassAlreadyExists = 1410;
+    internal static readonly nint WindowTop = 0;
     internal static readonly nint WindowBottom = 1;
 
     internal delegate bool EnumWindowsProcedure(nint window, nint data);

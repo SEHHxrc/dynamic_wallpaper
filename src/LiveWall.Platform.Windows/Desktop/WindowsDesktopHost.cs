@@ -33,7 +33,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
         new(
             shellSnapshot,
             new DesktopHostAdapterSelector([
-                new RaisedDesktopAdapter(),
+                new RaisedDesktopAdapter(allowUnvalidatedBuild: true),
                 new LegacyWorkerWAdapter(allowUnvalidatedBuild: true),
             ]),
             new NativeDesktopSurfaceFactory());
@@ -57,7 +57,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
         {
             lock (stateGate)
             {
-                return selectedAdapter?.AttachPoint.WindowHandle;
+                return selectedAdapter?.AttachmentLease.ValidationWindowHandle;
             }
         }
     }
@@ -85,7 +85,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
             lock (stateGate)
             {
                 bool unchanged = displayTopologyRevision == displays.Revision &&
-                    selectedAdapter?.AttachPoint == selected.AttachPoint &&
+                    selectedAdapter?.AttachmentLease == selected.AttachmentLease &&
                     connectedDisplays.SetEquals(nextDisplays);
                 if (unchanged)
                 {
@@ -97,7 +97,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
                 displayTopologyRevision = displays.Revision;
                 topology = new DesktopTopology(
                     checked(topology.Revision + 1),
-                    [selected.AttachPoint]);
+                    [selected.AttachmentLease.Capability]);
                 return topology;
             }
         }
@@ -141,7 +141,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
             ulong handle = await surfaceFactory.CreateAsync(
                     id,
                     request,
-                    selected.AttachPoint,
+                    selected.AttachmentLease,
                     cancellationToken)
                 .ConfigureAwait(false);
             DesktopSurface surface = new(id, request.DisplayIds.ToArray(), handle);
@@ -261,23 +261,44 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
         }
     }
 
+    public async Task AbandonSurfaceAsync(
+        SurfaceId surfaceId,
+        CancellationToken cancellationToken)
+    {
+        await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            TrackedSurface? tracked;
+            lock (stateGate)
+            {
+                surfaces.TryGetValue(surfaceId, out tracked);
+            }
+
+            if (tracked is null)
+            {
+                return;
+            }
+
+            await surfaceFactory.AbandonAsync(tracked.Surface.WindowHandle, cancellationToken)
+                .ConfigureAwait(false);
+            lock (stateGate)
+            {
+                surfaces.Remove(surfaceId);
+            }
+        }
+        finally
+        {
+            operationGate.Release();
+        }
+    }
+
     public async Task<DesktopTopology> RecoverAsync(CancellationToken cancellationToken)
     {
         await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
-            SelectedDesktopAdapter? previous;
-            lock (stateGate)
-            {
-                previous = selectedAdapter;
-            }
-
-            if (previous is not null)
-            {
-                await previous.Adapter.RecoverAsync(cancellationToken).ConfigureAwait(false);
-            }
-
             SelectedDesktopAdapter selected = await adapterSelector
                 .DiscoverAsync(shellSnapshot, cancellationToken)
                 .ConfigureAwait(false);
@@ -286,7 +307,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
                 selectedAdapter = selected;
                 topology = new DesktopTopology(
                     checked(topology.Revision + 1),
-                    [selected.AttachPoint]);
+                    [selected.AttachmentLease.Capability]);
                 return topology;
             }
         }

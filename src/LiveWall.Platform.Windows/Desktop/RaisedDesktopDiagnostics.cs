@@ -79,6 +79,107 @@ public static class RaisedDesktopDiagnostics
             cancellationToken);
     }
 
+    public static async Task<RaisedDesktopHostSurfaceLease> AcquireHostSurfaceAsync(
+        ShellWindowBounds virtualDesktopBounds,
+        Action<RaisedDesktopSnapshotStage, ShellTopologySnapshot>? snapshotObserver,
+        CancellationToken cancellationToken)
+    {
+        DesktopAttachmentLease attachmentLease = await DiscoverAttachmentLeaseCoreAsync(
+                RaisedDesktopAdapter.AdapterId,
+                virtualDesktopBounds,
+                snapshotObserver,
+                WindowsShellTopologyDiagnostics.CaptureSnapshot(),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return await RaisedDesktopHostSurfaceLease.CreateAsync(
+                attachmentLease, virtualDesktopBounds, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal static Task<DesktopAttachmentLease> DiscoverAttachmentLeaseAsync(
+        string adapterId,
+        Action<RaisedDesktopSnapshotStage, ShellTopologySnapshot>? snapshotObserver,
+        CancellationToken cancellationToken)
+    {
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        ShellWindowFingerprint? progman = before.TopLevelWindows.SingleOrDefault(window =>
+            window.WindowHandle == before.ShellWindowHandle &&
+            window.ClassName == "Progman");
+        if (progman?.Bounds is not ShellWindowBounds virtualDesktopBounds)
+        {
+            throw new DesktopAttachPointUnavailableException(
+                "The current Progman desktop bounds were unavailable.");
+        }
+
+        return DiscoverAttachmentLeaseCoreAsync(
+            adapterId,
+            virtualDesktopBounds,
+            snapshotObserver,
+            before,
+            cancellationToken);
+    }
+
+    private static async Task<DesktopAttachmentLease> DiscoverAttachmentLeaseCoreAsync(
+        string adapterId,
+        ShellWindowBounds virtualDesktopBounds,
+        Action<RaisedDesktopSnapshotStage, ShellTopologySnapshot>? snapshotObserver,
+        ShellTopologySnapshot before,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(adapterId);
+        cancellationToken.ThrowIfCancellationRequested();
+        snapshotObserver?.Invoke(RaisedDesktopSnapshotStage.Before, before);
+        await Task.Delay(StabilityDelay, cancellationToken).ConfigureAwait(false);
+        ShellTopologySnapshot stable = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        snapshotObserver?.Invoke(RaisedDesktopSnapshotStage.StablePreflight, stable);
+        RaisedDesktopAnalysis preflight = AnalyzePreflight(before, stable, virtualDesktopBounds);
+        if (preflight.Rejections.Count > 0 || preflight.Context is null)
+        {
+            throw new DesktopAttachPointUnavailableException(
+                string.Join("; ", preflight.Rejections.Select(item => $"{item.Code}: {item.Detail}")));
+        }
+
+        SendRequest(preflight.Context.ProgmanWindowHandle);
+        await Task.Delay(StabilityDelay, cancellationToken).ConfigureAwait(false);
+        ShellTopologySnapshot requestedSnapshot = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        snapshotObserver?.Invoke(RaisedDesktopSnapshotStage.AfterRequest, requestedSnapshot);
+        RaisedDesktopAnalysis requested = AnalyzeRequestedTopology(
+            stable, requestedSnapshot, virtualDesktopBounds);
+        if (requested.Rejections.Count > 0 || requested.Context is null)
+        {
+            throw new DesktopAttachPointUnavailableException(
+                string.Join("; ", requested.Rejections.Select(item => $"{item.Code}: {item.Detail}")));
+        }
+
+        ShellWindowFingerprint? competingSurface = requestedSnapshot.ShellDescendants
+            .Where(window =>
+                window.ParentWindowHandle == requested.Context.ProgmanWindowHandle &&
+                window.ProcessId != requested.Context.ProgmanProcessId &&
+                window.IsVisible &&
+                window.Bounds == virtualDesktopBounds &&
+                window.SiblingZOrderIndex > requested.Context.DefViewZOrderIndex &&
+                window.SiblingZOrderIndex < requested.Context.WorkerZOrderIndex)
+            .OrderBy(window => window.SiblingZOrderIndex)
+            .FirstOrDefault();
+        if (competingSurface is not null)
+        {
+            throw new DesktopAttachPointUnavailableException(
+                $"{RaisedDesktopRejectionCode.CompetingDesktopSurface}: " +
+                $"A visible full-desktop window from process " +
+                $"'{competingSurface.ProcessName ?? "unknown"}' already occupies the Raised Desktop layer. " +
+                "Exit the competing wallpaper application before running this diagnostic.");
+        }
+
+        return DesktopAttachmentLease.CreateRaised(
+            adapterId,
+            requested.Context.ProgmanWindowHandle,
+            requested.Context.DefViewWindowHandle,
+            requested.Context.WorkerWindowHandle,
+            requestedSnapshot.ShellWindowHandle,
+            requested.Context.ProgmanProcessId,
+            requested.AfterFingerprint.Value);
+    }
+
     internal static RaisedDesktopAnalysis AnalyzePreflight(
         ShellTopologySnapshot before,
         ShellTopologySnapshot stable,
@@ -753,5 +854,6 @@ public enum RaisedDesktopRejectionCode
     WorkerZOrderInvalid,
     UnexpectedTopologyMutation,
     SurfaceLayerValidationFailed,
+    CompetingDesktopSurface,
     CleanupIncomplete,
 }

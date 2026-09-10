@@ -231,16 +231,16 @@ internal struct DisplayConfigSourceDeviceName
     internal static DisplayConfigSourceDeviceName Create(
         NativeLuid adapterId,
         uint sourceId) => new()
-    {
-        Header = new DisplayConfigDeviceInfoHeader
         {
-            Type = DisplayNativeMethods.DisplayConfigGetSourceName,
-            Size = (uint)Marshal.SizeOf<DisplayConfigSourceDeviceName>(),
-            AdapterId = adapterId,
-            Id = sourceId,
-        },
-        ViewGdiDeviceName = string.Empty,
-    };
+            Header = new DisplayConfigDeviceInfoHeader
+            {
+                Type = DisplayNativeMethods.DisplayConfigGetSourceName,
+                Size = (uint)Marshal.SizeOf<DisplayConfigSourceDeviceName>(),
+                AdapterId = adapterId,
+                Id = sourceId,
+            },
+            ViewGdiDeviceName = string.Empty,
+        };
 }
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -262,15 +262,15 @@ internal struct DisplayConfigTargetDeviceName
     internal static DisplayConfigTargetDeviceName Create(
         NativeLuid adapterId,
         uint targetId) => new()
-    {
-        Header = new DisplayConfigDeviceInfoHeader
         {
-            Type = DisplayNativeMethods.DisplayConfigGetTargetName,
-            Size = (uint)Marshal.SizeOf<DisplayConfigTargetDeviceName>(),
-            AdapterId = adapterId,
-            Id = targetId,
-        },
-        MonitorFriendlyDeviceName = string.Empty,
-        MonitorDevicePath = string.Empty,
-    };
+            Header = new DisplayConfigDeviceInfoHeader
+            {
+                Type = DisplayNativeMethods.DisplayConfigGetTargetName,
+                Size = (uint)Marshal.SizeOf<DisplayConfigTargetDeviceName>(),
+                AdapterId = adapterId,
+                Id = targetId,
+            },
+            MonitorFriendlyDeviceName = string.Empty,
+            MonitorDevicePath = string.Empty,
+        };
 }

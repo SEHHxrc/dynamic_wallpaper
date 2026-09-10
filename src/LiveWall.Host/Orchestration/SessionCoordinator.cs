@@ -16,9 +16,16 @@ internal interface ISessionCoordinator
         IReadOnlyList<WallpaperAssignment> assignments,
         DisplayTopology topology,
         long generation,
+        ApplyGenerationOperation operation,
         CancellationToken cancellationToken);
 
-    Task RetireAsync(
+    int GetPlannedSurfaceCount(
+        IReadOnlyList<WallpaperAssignment> assignments,
+        DisplayTopology topology);
+
+    TimeSpan GetApplyDeadline(int surfaceCount);
+
+    Task<SessionRetirementBatchResult> RetireAsync(
         IReadOnlyList<PreparedSession> sessions,
         CancellationToken cancellationToken);
 
@@ -40,6 +47,14 @@ internal interface ISessionCoordinator
     Task DestroySurfacesAsync(
         IEnumerable<PreparedSurface> surfaces,
         CancellationToken cancellationToken);
+
+    Task AbandonSurfacesAsync(
+        IEnumerable<PreparedSurface> surfaces,
+        CancellationToken cancellationToken);
+
+    Task AbandonRecoveryAsync(
+        PreparedRecovery recovery,
+        CancellationToken cancellationToken);
 }
 
 internal sealed class SessionCoordinator : ISessionCoordinator
@@ -49,13 +64,19 @@ internal sealed class SessionCoordinator : ISessionCoordinator
     private readonly RendererProviderSelector rendererProviderSelector;
     private readonly IDesktopHost desktopHost;
     private readonly RuntimeEnvironment runtimeEnvironment;
+    private readonly TimeSpan rendererStageTimeout;
+    private readonly ApplyDeadlineBudget applyDeadlineBudget;
+    private readonly SessionRetirementPolicy retirementPolicy;
 
     public SessionCoordinator(
         IWallpaperRepository wallpaperRepository,
         ILayoutPlanner layoutPlanner,
         RendererProviderSelector rendererProviderSelector,
         IDesktopHost desktopHost,
-        RuntimeEnvironment runtimeEnvironment)
+        RuntimeEnvironment runtimeEnvironment,
+        TimeSpan? rendererStageTimeout = null,
+        ApplyDeadlineBudget? applyDeadlineBudget = null,
+        SessionRetirementPolicy? retirementPolicy = null)
     {
         this.wallpaperRepository = wallpaperRepository ??
             throw new ArgumentNullException(nameof(wallpaperRepository));
@@ -65,15 +86,23 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         this.desktopHost = desktopHost ?? throw new ArgumentNullException(nameof(desktopHost));
         this.runtimeEnvironment = runtimeEnvironment ??
             throw new ArgumentNullException(nameof(runtimeEnvironment));
+        this.rendererStageTimeout = rendererStageTimeout ?? TimeSpan.FromSeconds(10);
+        this.applyDeadlineBudget = applyDeadlineBudget ?? ApplyDeadlineBudget.Default;
+        this.retirementPolicy = (retirementPolicy ?? SessionRetirementPolicy.Default).Validate();
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(
+            this.rendererStageTimeout,
+            TimeSpan.Zero);
     }
 
     public async Task<PreparedApply> PrepareApplyAsync(
         IReadOnlyList<WallpaperAssignment> assignments,
         DisplayTopology topology,
         long generation,
+        ApplyGenerationOperation operation,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(assignments);
+        ArgumentNullException.ThrowIfNull(operation);
         Dictionary<WallpaperId, WallpaperLibraryEntry> libraryEntries = [];
         foreach (WallpaperId wallpaperId in assignments
                      .Select(assignment => assignment.WallpaperId)
@@ -86,9 +115,30 @@ internal sealed class SessionCoordinator : ISessionCoordinator
             libraryEntries.Add(wallpaperId, libraryEntry);
         }
 
-        DesktopTopology desktopTopology = await desktopHost
-            .EnsureTopologyAsync(topology, cancellationToken)
-            .ConfigureAwait(false);
+        DesktopTopology desktopTopology;
+        try
+        {
+            desktopTopology = await desktopHost
+                .EnsureTopologyAsync(topology, cancellationToken)
+                .ConfigureAwait(false);
+            operation.Record(
+                ApplyGenerationPhase.TopologyReady,
+                assignments.Select(assignment => assignment.DisplayId).ToArray());
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            operation.Record(
+                ApplyGenerationPhase.TopologyReady,
+                assignments.Select(assignment => assignment.DisplayId).ToArray(),
+                outcome: ApplyStageOutcome.Rejected,
+                failureReason: ApplyFailureReason.TopologyFailed,
+                detail: exception.Message);
+            throw new ApplyStageException(
+                ApplyGenerationPhase.TopologyReady,
+                ApplyFailureReason.TopologyFailed,
+                exception.Message,
+                exception);
+        }
         LayoutPlan plan = layoutPlanner.CreatePlan(topology, assignments);
         Dictionary<DisplayId, DisplayDescriptor> displays = topology.Displays
             .ToDictionary(display => display.Id);
@@ -96,11 +146,17 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         DesktopSurface? pendingSurface = null;
         SurfaceRequest? pendingRequest = null;
         IRendererSession? pendingRenderer = null;
+        IReadOnlyList<DisplayId>? pendingDisplayIds = null;
+        int pendingSurfaceOrdinal = 0;
 
         try
         {
-            foreach (PlannedSurface plannedSurface in plan.Surfaces)
+            for (int surfaceIndex = 0; surfaceIndex < plan.Surfaces.Count; surfaceIndex++)
             {
+                PlannedSurface plannedSurface = plan.Surfaces[surfaceIndex];
+                int surfaceOrdinal = surfaceIndex + 1;
+                pendingDisplayIds = plannedSurface.DisplayIds;
+                pendingSurfaceOrdinal = surfaceOrdinal;
                 WallpaperLibraryEntry libraryEntry = libraryEntries[plannedSurface.WallpaperId];
                 IRendererProvider provider = rendererProviderSelector.Select(
                     libraryEntry.Definition,
@@ -109,39 +165,155 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                     plannedSurface.DisplayIds,
                     plannedSurface.Bounds,
                     plannedSurface.FitMode);
-                pendingSurface = await desktopHost.CreateSurfaceAsync(
-                        pendingRequest,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                operation.BeginPhase(ApplyGenerationPhase.SurfaceCreated);
+                try
+                {
+                    pendingSurface = await desktopHost.CreateSurfaceAsync(
+                            pendingRequest,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    operation.Record(
+                        ApplyGenerationPhase.SurfaceCreated,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    operation.Record(
+                        ApplyGenerationPhase.SurfaceCreated,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal,
+                        ApplyStageOutcome.Rejected,
+                        ApplyFailureReason.SurfaceCreationFailed,
+                        exception.Message);
+                    throw new ApplyStageException(
+                        ApplyGenerationPhase.SurfaceCreated,
+                        ApplyFailureReason.SurfaceCreationFailed,
+                        exception.Message,
+                        exception);
+                }
                 SessionId sessionId = new(Guid.NewGuid().ToString("N"));
-                pendingRenderer = await provider.CreateAsync(
-                        new RendererLaunchContext(
-                            sessionId,
-                            generation,
-                            libraryEntry.Definition,
-                            libraryEntry.CanonicalContentRoot),
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                RendererLaunchContext launchContext = new(
+                    sessionId,
+                    generation,
+                    libraryEntry.Definition,
+                    libraryEntry.CanonicalContentRoot);
+                operation.BeginPhase(ApplyGenerationPhase.ProcessStarted);
+                pendingRenderer = provider is IObservableRendererProvider observable
+                    ? await observable.CreateObservedAsync(
+                            launchContext,
+                            milestone =>
+                            {
+                                if (milestone.IsPhaseStart)
+                                {
+                                    operation.BeginPhase(milestone.Phase);
+                                }
+                                else
+                                {
+                                    operation.Record(
+                                        milestone.Phase,
+                                        plannedSurface.DisplayIds,
+                                        surfaceOrdinal,
+                                        milestone.Outcome,
+                                        milestone.FailureReason,
+                                        milestone.Detail,
+                                        milestone.Timestamp);
+                                }
+                            },
+                            cancellationToken)
+                        .ConfigureAwait(false)
+                    : await provider.CreateAsync(launchContext, cancellationToken)
+                        .ConfigureAwait(false);
+                if (provider is not IObservableRendererProvider)
+                {
+                    operation.Record(
+                        ApplyGenerationPhase.Initialized,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal);
+                }
                 double scaleFactor = plannedSurface.DisplayIds.Count == 1
                     ? displays[plannedSurface.DisplayIds[0]].ScaleFactor
                     : 1;
 
-                await pendingRenderer.SendAsync(
-                        new AttachRendererSurface(
-                            generation,
-                            pendingSurface.WindowHandle,
-                            plannedSurface.Bounds,
-                            scaleFactor),
+                operation.BeginPhase(ApplyGenerationPhase.AttachSent);
+                try
+                {
+                    await pendingRenderer.SendAsync(
+                            new AttachRendererSurface(
+                                generation,
+                                pendingSurface.WindowHandle,
+                                plannedSurface.Bounds,
+                                scaleFactor),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    operation.Record(
+                        ApplyGenerationPhase.AttachSent,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    operation.Record(
+                        ApplyGenerationPhase.AttachSent,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal,
+                        ApplyStageOutcome.Rejected,
+                        ApplyFailureReason.AttachWriteFailed,
+                        exception.Message);
+                    throw new ApplyStageException(
+                        ApplyGenerationPhase.AttachSent,
+                        ApplyFailureReason.AttachWriteFailed,
+                        exception.Message,
+                        exception);
+                }
+                operation.BeginPhase(ApplyGenerationPhase.SurfaceAttached);
+                await WaitForSurfaceAttachedAsync(
+                        pendingRenderer,
+                        generation,
+                        "initial attachment",
+                        operation,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal,
                         cancellationToken)
                     .ConfigureAwait(false);
-                await pendingRenderer.SendAsync(
-                        new LoadRendererContent(
-                            generation,
-                            libraryEntry.Definition,
-                            libraryEntry.CanonicalContentRoot),
+                operation.BeginPhase(ApplyGenerationPhase.LoadSent);
+                try
+                {
+                    await pendingRenderer.SendAsync(
+                            new LoadRendererContent(
+                                generation,
+                                libraryEntry.Definition,
+                                libraryEntry.CanonicalContentRoot),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    operation.Record(
+                        ApplyGenerationPhase.LoadSent,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    operation.Record(
+                        ApplyGenerationPhase.LoadSent,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal,
+                        ApplyStageOutcome.Rejected,
+                        ApplyFailureReason.LoadWriteFailed,
+                        exception.Message);
+                    throw new ApplyStageException(
+                        ApplyGenerationPhase.LoadSent,
+                        ApplyFailureReason.LoadWriteFailed,
+                        exception.Message,
+                        exception);
+                }
+                operation.BeginPhase(ApplyGenerationPhase.ContentLoaded);
+                await WaitForContentAndFirstFrameAsync(
+                        pendingRenderer,
+                        generation,
+                        operation,
+                        plannedSurface.DisplayIds,
+                        surfaceOrdinal,
                         cancellationToken)
-                    .ConfigureAwait(false);
-                await WaitForFirstFrameAsync(pendingRenderer, generation, cancellationToken)
                     .ConfigureAwait(false);
 
                 WallpaperSession session = new(
@@ -154,10 +326,13 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                 preparedSessions.Add(new PreparedSession(
                     session,
                     pendingRenderer,
-                    [new PreparedSurface(pendingSurface, pendingRequest)]));
+                    [new PreparedSurface(pendingSurface, pendingRequest)],
+                    surfaceOrdinal));
                 pendingRenderer = null;
                 pendingSurface = null;
                 pendingRequest = null;
+                pendingDisplayIds = null;
+                pendingSurfaceOrdinal = 0;
             }
 
             return new PreparedApply(
@@ -169,6 +344,8 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         }
         catch (Exception preparationFailure)
         {
+            ApplyGenerationPhase failedPhase =
+                operation.CurrentPhase ?? ApplyGenerationPhase.TopologyReady;
             List<Exception> cleanupFailures = [];
             await CleanupSessionAsync(
                     pendingRenderer,
@@ -178,6 +355,9 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                     generation,
                     "preparation-failed",
                     cleanupFailures,
+                    operation,
+                    pendingDisplayIds,
+                    pendingSurfaceOrdinal,
                     CancellationToken.None)
                 .ConfigureAwait(false);
             foreach (PreparedSession prepared in preparedSessions)
@@ -188,6 +368,9 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                         prepared.Session.Generation,
                         "preparation-rolled-back",
                         cleanupFailures,
+                        operation,
+                        prepared.Session.Displays,
+                        prepared.SurfaceOrdinal,
                         CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -199,33 +382,33 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                     [preparationFailure, .. cleanupFailures]);
             }
 
+            operation.BeginPhase(failedPhase);
             throw;
         }
     }
 
-    public async Task RetireAsync(
+    public int GetPlannedSurfaceCount(
+        IReadOnlyList<WallpaperAssignment> assignments,
+        DisplayTopology topology)
+    {
+        ArgumentNullException.ThrowIfNull(assignments);
+        ArgumentNullException.ThrowIfNull(topology);
+        return layoutPlanner.CreatePlan(topology, assignments).Surfaces.Count;
+    }
+
+    public TimeSpan GetApplyDeadline(int surfaceCount) =>
+        applyDeadlineBudget.Calculate(surfaceCount);
+
+    public async Task<SessionRetirementBatchResult> RetireAsync(
         IReadOnlyList<PreparedSession> sessions,
         CancellationToken cancellationToken)
     {
-        List<Exception> cleanupFailures = [];
-        foreach (PreparedSession prepared in sessions)
-        {
-            await CleanupSessionAsync(
-                    prepared.Renderer,
-                    prepared.Surfaces,
-                    prepared.Session.Generation,
-                    "session-replaced",
-                    cleanupFailures,
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        if (cleanupFailures.Count > 0)
-        {
-            throw new AggregateException(
-                "One or more retired session resources could not be released.",
-                cleanupFailures);
-        }
+        ArgumentNullException.ThrowIfNull(sessions);
+        SessionRetirementResult[] results = await Task.WhenAll(
+                sessions.Select(prepared =>
+                    RetireSessionAsync(prepared, cancellationToken)))
+            .ConfigureAwait(false);
+        return new SessionRetirementBatchResult(Array.AsReadOnly(results));
     }
 
     public Task ReplaceSurfacesAsync(
@@ -288,27 +471,40 @@ internal sealed class SessionCoordinator : ISessionCoordinator
 
                 await active.Renderer.SendAsync(
                         new SetRendererBounds(
-                            active.Session.Generation,
+                            hostGeneration,
                             previousSurface.Request.Bounds,
                             scaleFactor),
                         cancellationToken)
                     .ConfigureAwait(false);
                 await active.Renderer.SendAsync(
                         new AttachRendererSurface(
-                            active.Session.Generation,
+                            hostGeneration,
                             provisional.WindowHandle,
                             previousSurface.Request.Bounds,
                             scaleFactor),
                         cancellationToken)
                     .ConfigureAwait(false);
-                await WaitForSurfaceAndFirstFrameAsync(
+                await WaitForSurfaceAttachedAsync(
                         active.Renderer,
-                        active.Session.Generation,
+                        hostGeneration,
+                        "desktop recovery attachment",
+                        null,
+                        null,
+                        0,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await WaitForFirstFrameAfterReattachAsync(
+                        active.Renderer,
+                        hostGeneration,
                         cancellationToken)
                     .ConfigureAwait(false);
                 recovered.Add(new RecoveredSession(
                     active,
-                    active with { Surfaces = [provisionalSurface] }));
+                    active with
+                    {
+                        Session = active.Session with { Generation = hostGeneration },
+                        Surfaces = [provisionalSurface],
+                    }));
             }
 
             return new PreparedRecovery(
@@ -319,20 +515,19 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         }
         catch (Exception recoveryFailure)
         {
-            List<Exception> rollbackFailures = [];
-            foreach (PreparedSession active in activeSessions.Take(recovered.Count + 1))
-            {
-                await TryReattachPreviousSurfaceAsync(active, displays, rollbackFailures)
-                    .ConfigureAwait(false);
-            }
-
-            await DestroySurfacesCollectingFailuresAsync(provisionalSurfaces, rollbackFailures)
+            List<Exception> cleanupFailures = [];
+            await AbandonSessionsAndSurfacesAsync(
+                    activeSessions,
+                    activeSessions.SelectMany(session => session.Surfaces)
+                        .Concat(provisionalSurfaces),
+                    cleanupFailures,
+                    CancellationToken.None)
                 .ConfigureAwait(false);
-            if (rollbackFailures.Count > 0)
+            if (cleanupFailures.Count > 0)
             {
                 throw new AggregateException(
-                    "Desktop recovery failed and rollback was incomplete.",
-                    [recoveryFailure, .. rollbackFailures]);
+                    "Desktop recovery failed and uncertain generation resources could not all be abandoned.",
+                    [recoveryFailure, .. cleanupFailures]);
             }
 
             throw;
@@ -383,65 +578,98 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         }
     }
 
-    private static async Task TryReattachPreviousSurfaceAsync(
-        PreparedSession active,
-        Dictionary<DisplayId, DisplayDescriptor> displays,
-        List<Exception> failures)
+    public async Task AbandonSurfacesAsync(
+        IEnumerable<PreparedSurface> surfaces,
+        CancellationToken cancellationToken)
     {
-        if (active.Surfaces.Count != 1)
+        ArgumentNullException.ThrowIfNull(surfaces);
+        List<Exception> failures = [];
+        foreach (PreparedSurface surface in surfaces)
         {
-            return;
+            try
+            {
+                await desktopHost.AbandonSurfaceAsync(surface.Surface.Id, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
         }
 
-        PreparedSurface previous = active.Surfaces[0];
-        double scaleFactor = previous.Request.DisplayIds.Count == 1
-            ? displays[previous.Request.DisplayIds[0]].ScaleFactor
-            : 1;
-        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
-        try
+        if (failures.Count > 0)
         {
-            await active.Renderer.SendAsync(
-                    new SetRendererBounds(
-                        active.Session.Generation,
-                        previous.Request.Bounds,
-                        scaleFactor),
-                    timeout.Token)
-                .ConfigureAwait(false);
-            await active.Renderer.SendAsync(
-                    new AttachRendererSurface(
-                        active.Session.Generation,
-                        previous.Surface.WindowHandle,
-                        previous.Request.Bounds,
-                        scaleFactor),
-                    timeout.Token)
-                .ConfigureAwait(false);
-            await WaitForSurfaceAndFirstFrameAsync(
-                    active.Renderer,
-                    active.Session.Generation,
-                    timeout.Token)
-                .ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            failures.Add(exception);
+            throw new AggregateException("Desktop Surface abandonment failed.", failures);
         }
     }
 
-    private async Task DestroySurfacesCollectingFailuresAsync(
-        IEnumerable<PreparedSurface> surfaces,
-        List<Exception> failures)
+    public async Task AbandonRecoveryAsync(
+        PreparedRecovery recovery,
+        CancellationToken cancellationToken)
     {
-        try
+        ArgumentNullException.ThrowIfNull(recovery);
+        PreparedSession[] sessions = recovery.Sessions
+            .Select(item => item.Previous)
+            .DistinctBy(item => item.Session.Id)
+            .ToArray();
+        PreparedSurface[] surfaces = recovery.Sessions
+            .SelectMany(item => item.Previous.Surfaces.Concat(item.Replacement.Surfaces))
+            .DistinctBy(item => item.Surface.Id)
+            .ToArray();
+        List<Exception> failures = [];
+        await AbandonSessionsAndSurfacesAsync(
+                sessions,
+                surfaces,
+                failures,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (failures.Count > 0)
         {
-            await DestroySurfacesAsync(surfaces, CancellationToken.None).ConfigureAwait(false);
+            throw new AggregateException(
+                "Desktop recovery resources could not all be abandoned.",
+                failures);
         }
-        catch (AggregateException exception)
+    }
+
+    private async Task AbandonSessionsAndSurfacesAsync(
+        IEnumerable<PreparedSession> sessions,
+        IEnumerable<PreparedSurface> surfaces,
+        List<Exception> failures,
+        CancellationToken cancellationToken)
+    {
+        HashSet<IRendererSession> abandonedRenderers =
+            new(ReferenceEqualityComparer.Instance);
+        foreach (PreparedSession session in sessions)
         {
-            failures.AddRange(exception.InnerExceptions);
+            IRendererSession renderer = session.Renderer;
+            if (!abandonedRenderers.Add(renderer))
+            {
+                continue;
+            }
+
+            try
+            {
+                await renderer.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
         }
-        catch (Exception exception)
+
+        foreach (PreparedSurface surface in surfaces.DistinctBy(item => item.Surface.Id))
         {
-            failures.Add(exception);
+            try
+            {
+                await desktopHost.AbandonSurfaceAsync(
+                        surface.Surface.Id,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
         }
     }
 
@@ -451,20 +679,61 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         long generation,
         string reason,
         List<Exception> failures,
+        ApplyGenerationOperation? operation = null,
+        IReadOnlyList<DisplayId>? displayIds = null,
+        int surfaceOrdinal = 0,
         CancellationToken shutdownCancellationToken = default)
     {
+        int failuresBeforeCleanup = failures.Count;
+        using CancellationTokenSource? cleanupDeadline = operation is null
+            ? null
+            : CancellationTokenSource.CreateLinkedTokenSource(
+                shutdownCancellationToken,
+                operation.DeadlineToken);
+        CancellationToken gracefulShutdownToken =
+            cleanupDeadline?.Token ?? shutdownCancellationToken;
         if (renderer is not null)
         {
+            bool shutdownSent = false;
             try
             {
                 await renderer.SendAsync(
                         new ShutdownRenderer(generation, reason),
-                        shutdownCancellationToken)
+                        gracefulShutdownToken)
                     .ConfigureAwait(false);
+                shutdownSent = true;
+            }
+            catch (OperationCanceledException) when (
+                operation?.DeadlineToken.IsCancellationRequested == true)
+            {
             }
             catch (Exception exception)
             {
                 failures.Add(exception);
+            }
+
+            if (shutdownSent)
+            {
+                try
+                {
+                    await WaitForShutdownCompletedAsync(
+                            renderer,
+                            generation,
+                            gracefulShutdownToken)
+                        .ConfigureAwait(false);
+                    operation?.Record(
+                        ApplyGenerationPhase.ShutdownCompleted,
+                        displayIds,
+                        surfaceOrdinal);
+                }
+                catch (OperationCanceledException) when (
+                    operation?.DeadlineToken.IsCancellationRequested == true)
+                {
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
             }
 
             try
@@ -489,70 +758,414 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                 failures.Add(exception);
             }
         }
+
+        operation?.Record(
+            ApplyGenerationPhase.CleanupVerified,
+            displayIds,
+            surfaceOrdinal,
+            failures.Count == failuresBeforeCleanup
+                ? ApplyStageOutcome.Success
+                : ApplyStageOutcome.Rejected,
+            failures.Count == failuresBeforeCleanup
+                ? ApplyFailureReason.None
+                : ApplyFailureReason.CleanupFailed,
+            failures.Count == failuresBeforeCleanup
+                ? null
+                : "One or more Renderer or Surface resources failed cleanup.");
     }
 
-    private static async Task WaitForFirstFrameAsync(
+    private async Task<SessionRetirementResult> RetireSessionAsync(
+        PreparedSession prepared,
+        CancellationToken cancellationToken)
+    {
+        long startedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+        List<SessionRetirementIssue> issues = [];
+        bool shutdownSent = false;
+        bool shutdownCompleted = false;
+        bool rendererDisposed = false;
+        bool surfacesCleaned = true;
+
+        using (CancellationTokenSource shutdownBudget =
+               CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            shutdownBudget.CancelAfter(retirementPolicy.GracefulShutdown);
+            try
+            {
+                await prepared.Renderer.SendAsync(
+                        new ShutdownRenderer(prepared.Session.Generation, "session-replaced"),
+                        shutdownBudget.Token)
+                    .ConfigureAwait(false);
+                shutdownSent = true;
+                await WaitForShutdownCompletedAsync(
+                        prepared.Renderer,
+                        prepared.Session.Generation,
+                        shutdownBudget.Token)
+                    .ConfigureAwait(false);
+                shutdownCompleted = true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                issues.Add(new SessionRetirementIssue(
+                    SessionRetirementIssueKind.ShutdownCancelled,
+                    "Graceful Renderer shutdown was cancelled by the caller."));
+            }
+            catch (OperationCanceledException)
+            {
+                issues.Add(new SessionRetirementIssue(
+                    SessionRetirementIssueKind.ShutdownTimeout,
+                    $"Renderer did not complete graceful shutdown within {retirementPolicy.GracefulShutdown}."));
+            }
+            catch (TimeoutException exception)
+            {
+                issues.Add(new SessionRetirementIssue(
+                    SessionRetirementIssueKind.ShutdownTimeout,
+                    exception.Message));
+            }
+            catch (Exception exception)
+            {
+                issues.Add(new SessionRetirementIssue(
+                    SessionRetirementIssueKind.ShutdownFailed,
+                    exception.Message));
+            }
+        }
+
+        try
+        {
+            Task disposeTask = prepared.Renderer.DisposeAsync().AsTask();
+            await disposeTask.WaitAsync(
+                    retirementPolicy.RendererDispose,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            rendererDisposed = true;
+        }
+        catch (TimeoutException)
+        {
+            issues.Add(new SessionRetirementIssue(
+                SessionRetirementIssueKind.RendererDisposeTimeout,
+                $"Renderer DisposeAsync did not complete within {retirementPolicy.RendererDispose}."));
+        }
+        catch (Exception exception)
+        {
+            issues.Add(new SessionRetirementIssue(
+                SessionRetirementIssueKind.RendererDisposeFailed,
+                exception.Message));
+        }
+
+        foreach (PreparedSurface surface in prepared.Surfaces)
+        {
+            try
+            {
+                await desktopHost.DestroySurfaceAsync(surface.Surface.Id, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                surfacesCleaned = false;
+                issues.Add(new SessionRetirementIssue(
+                    SessionRetirementIssueKind.SurfaceCleanupFailed,
+                    $"Surface '{surface.Surface.Id}' cleanup failed: {exception.Message}"));
+            }
+        }
+
+        return new SessionRetirementResult(
+            prepared.Session.Id,
+            prepared.Session.Generation,
+            Array.AsReadOnly(prepared.Session.Displays.ToArray()),
+            prepared.SurfaceOrdinal,
+            SessionRetirementClock.Elapsed(startedTimestamp),
+            shutdownSent,
+            shutdownCompleted,
+            rendererDisposed,
+            surfacesCleaned,
+            Array.AsReadOnly(issues.ToArray()));
+    }
+
+    private async Task WaitForSurfaceAttachedAsync(
+        IRendererSession renderer,
+        long generation,
+        string phase,
+        ApplyGenerationOperation? operation,
+        IReadOnlyList<DisplayId>? displayIds,
+        int surfaceOrdinal,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (RendererEvent rendererEvent in ReadStageEventsAsync(renderer, phase, cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                ValidateEventGeneration(rendererEvent, generation, phase);
+
+                switch (rendererEvent)
+                {
+                    case RendererSurfaceAttached:
+                        operation?.Record(
+                            ApplyGenerationPhase.SurfaceAttached,
+                            displayIds,
+                            surfaceOrdinal);
+                        return;
+                    case RendererFailed failure:
+                        throw new InvalidOperationException(
+                            $"Renderer failed during {phase}: {failure.ErrorCode}.");
+                    case RendererPlaybackStateChanged:
+                        continue;
+                    default:
+                        throw UnexpectedRendererEvent(rendererEvent, phase);
+                }
+            }
+
+            throw new InvalidOperationException(
+                $"Renderer event stream ended before SurfaceAttached during {phase}.");
+        }
+        catch (TimeoutException exception) when (operation is not null)
+        {
+            operation.Record(
+                ApplyGenerationPhase.SurfaceAttached,
+                displayIds,
+                surfaceOrdinal,
+                ApplyStageOutcome.Timeout,
+                ApplyFailureReason.SurfaceAttachedTimeout,
+                exception.Message);
+            throw new ApplyStageException(
+                ApplyGenerationPhase.SurfaceAttached,
+                ApplyFailureReason.SurfaceAttachedTimeout,
+                exception.Message,
+                exception);
+        }
+        catch (Exception exception) when (
+            operation is not null &&
+            exception is not OperationCanceledException &&
+            exception is not ApplyStageException)
+        {
+            operation.Record(
+                ApplyGenerationPhase.SurfaceAttached,
+                displayIds,
+                surfaceOrdinal,
+                ApplyStageOutcome.Rejected,
+                ApplyFailureReason.SurfaceAttachmentRejected,
+                exception.Message);
+            throw new ApplyStageException(
+                ApplyGenerationPhase.SurfaceAttached,
+                ApplyFailureReason.SurfaceAttachmentRejected,
+                exception.Message,
+                exception);
+        }
+    }
+
+    private async Task WaitForContentAndFirstFrameAsync(
+        IRendererSession renderer,
+        long generation,
+        ApplyGenerationOperation operation,
+        IReadOnlyList<DisplayId> displayIds,
+        int surfaceOrdinal,
+        CancellationToken cancellationToken)
+    {
+        bool contentLoaded = false;
+        try
+        {
+            await foreach (RendererEvent rendererEvent in ReadStageEventsAsync(
+                               renderer,
+                               "initial content load",
+                               cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                const string phase = "initial content load";
+                ValidateEventGeneration(rendererEvent, generation, phase);
+
+                switch (rendererEvent)
+                {
+                    case RendererContentLoaded when !contentLoaded:
+                        contentLoaded = true;
+                        operation.Record(
+                            ApplyGenerationPhase.ContentLoaded,
+                            displayIds,
+                            surfaceOrdinal);
+                        operation.BeginPhase(ApplyGenerationPhase.FirstFramePresented);
+                        break;
+                    case RendererFirstFramePresented when contentLoaded:
+                        operation.Record(
+                            ApplyGenerationPhase.FirstFramePresented,
+                            displayIds,
+                            surfaceOrdinal);
+                        return;
+                    case RendererFailed failure:
+                        throw new InvalidOperationException(
+                            $"Renderer failed during {phase}: {failure.ErrorCode}.");
+                    case RendererPlaybackStateChanged:
+                        continue;
+                    default:
+                        throw UnexpectedRendererEvent(rendererEvent, phase);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Renderer event stream ended before ContentLoaded and FirstFramePresented.");
+        }
+        catch (TimeoutException exception)
+        {
+            ApplyGenerationPhase failedPhase = contentLoaded
+                ? ApplyGenerationPhase.FirstFramePresented
+                : ApplyGenerationPhase.ContentLoaded;
+            ApplyFailureReason reason = contentLoaded
+                ? ApplyFailureReason.FirstFrameTimeout
+                : ApplyFailureReason.ContentLoadedTimeout;
+            operation.Record(
+                failedPhase,
+                displayIds,
+                surfaceOrdinal,
+                ApplyStageOutcome.Timeout,
+                reason,
+                exception.Message);
+            throw new ApplyStageException(failedPhase, reason, exception.Message, exception);
+        }
+        catch (Exception exception) when (
+            exception is not OperationCanceledException &&
+            exception is not ApplyStageException)
+        {
+            ApplyGenerationPhase failedPhase = contentLoaded
+                ? ApplyGenerationPhase.FirstFramePresented
+                : ApplyGenerationPhase.ContentLoaded;
+            ApplyFailureReason reason = contentLoaded
+                ? ApplyFailureReason.FirstFrameRejected
+                : ApplyFailureReason.ContentLoadRejected;
+            operation.Record(
+                failedPhase,
+                displayIds,
+                surfaceOrdinal,
+                ApplyStageOutcome.Rejected,
+                reason,
+                exception.Message);
+            throw new ApplyStageException(failedPhase, reason, exception.Message, exception);
+        }
+    }
+
+    private async Task WaitForFirstFrameAfterReattachAsync(
         IRendererSession renderer,
         long generation,
         CancellationToken cancellationToken)
     {
-        await foreach (RendererEvent rendererEvent in renderer.ReadEventsAsync(cancellationToken)
+        await foreach (RendererEvent rendererEvent in ReadStageEventsAsync(
+                           renderer,
+                           "desktop recovery first frame",
+                           cancellationToken)
                            .ConfigureAwait(false))
         {
-            if (rendererEvent.Generation != generation)
-            {
-                continue;
-            }
-
+            const string phase = "desktop recovery first frame";
+            ValidateEventGeneration(rendererEvent, generation, phase);
             switch (rendererEvent)
             {
                 case RendererFirstFramePresented:
                     return;
                 case RendererFailed failure:
                     throw new InvalidOperationException(
-                        $"Renderer failed before presenting its first frame: {failure.ErrorCode}.");
-            }
-        }
-
-        throw new InvalidOperationException("Renderer event stream ended before the first frame.");
-    }
-
-    private static async Task WaitForSurfaceAndFirstFrameAsync(
-        IRendererSession renderer,
-        long generation,
-        CancellationToken cancellationToken)
-    {
-        bool surfaceAttached = false;
-        bool firstFramePresented = false;
-        await foreach (RendererEvent rendererEvent in renderer.ReadEventsAsync(cancellationToken)
-                           .ConfigureAwait(false))
-        {
-            if (rendererEvent.Generation != generation)
-            {
-                continue;
-            }
-
-            switch (rendererEvent)
-            {
-                case RendererSurfaceAttached:
-                    surfaceAttached = true;
-                    break;
-                case RendererFirstFramePresented:
-                    firstFramePresented = true;
-                    break;
-                case RendererFailed failure:
-                    throw new InvalidOperationException(
-                        $"Renderer failed during desktop recovery: {failure.ErrorCode}.");
-            }
-
-            if (surfaceAttached && firstFramePresented)
-            {
-                return;
+                        $"Renderer failed during {phase}: {failure.ErrorCode}.");
+                case RendererPlaybackStateChanged:
+                    continue;
+                default:
+                    throw UnexpectedRendererEvent(rendererEvent, phase);
             }
         }
 
         throw new InvalidOperationException(
-            "Renderer event stream ended before SurfaceAttached and FirstFramePresented.");
+            "Renderer event stream ended before FirstFramePresented during desktop recovery.");
+    }
+
+    private async Task WaitForShutdownCompletedAsync(
+        IRendererSession renderer,
+        long generation,
+        CancellationToken cancellationToken)
+    {
+        await foreach (RendererEvent rendererEvent in ReadStageEventsAsync(
+                           renderer,
+                           "Renderer shutdown",
+                           cancellationToken)
+                           .ConfigureAwait(false))
+        {
+            ValidateEventGeneration(rendererEvent, generation, "Renderer shutdown");
+            switch (rendererEvent)
+            {
+                case RendererShutdownCompleted:
+                    return;
+                case RendererFailed failure:
+                    throw new InvalidOperationException(
+                        $"Renderer failed during shutdown: {failure.ErrorCode}.");
+                case RendererPlaybackStateChanged:
+                    continue;
+                default:
+                    throw UnexpectedRendererEvent(rendererEvent, "Renderer shutdown");
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Renderer event stream ended before ShutdownCompleted.");
+    }
+
+    private static void ValidateEventGeneration(
+        RendererEvent rendererEvent,
+        long expectedGeneration,
+        string phase)
+    {
+        if (rendererEvent.Generation != expectedGeneration)
+        {
+            throw new InvalidOperationException(
+                $"Renderer emitted generation {rendererEvent.Generation} during {phase}; " +
+                $"generation {expectedGeneration} was required.");
+        }
+    }
+
+    private static InvalidOperationException UnexpectedRendererEvent(
+        RendererEvent rendererEvent,
+        string phase) =>
+        new($"Renderer emitted unexpected {rendererEvent.GetType().Name} during {phase}.");
+
+    private async IAsyncEnumerable<RendererEvent> ReadStageEventsAsync(
+        IRendererSession renderer,
+        string phase,
+        [System.Runtime.CompilerServices.EnumeratorCancellation]
+        CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource timeout =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(rendererStageTimeout);
+        IAsyncEnumerator<RendererEvent> enumerator = renderer
+            .ReadEventsAsync(timeout.Token)
+            .GetAsyncEnumerator(timeout.Token);
+        try
+        {
+            while (true)
+            {
+                bool hasNext;
+                try
+                {
+                    hasNext = await enumerator.MoveNextAsync().ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (
+                    timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException(
+                        $"Renderer did not complete {phase} within {rendererStageTimeout}.");
+                }
+
+                if (!hasNext)
+                {
+                    yield break;
+                }
+
+                yield return enumerator.Current;
+            }
+        }
+        finally
+        {
+            try
+            {
+                await enumerator.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (
+                timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+            }
+        }
+
     }
 }
 
@@ -566,7 +1179,8 @@ internal sealed record PreparedApply(
 internal sealed record PreparedSession(
     WallpaperSession Session,
     IRendererSession Renderer,
-    IReadOnlyList<PreparedSurface> Surfaces);
+    IReadOnlyList<PreparedSurface> Surfaces,
+    int SurfaceOrdinal = 0);
 
 internal sealed record PreparedSurface(
     DesktopSurface Surface,

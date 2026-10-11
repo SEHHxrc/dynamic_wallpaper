@@ -29,7 +29,8 @@ internal sealed record DesktopAttachmentLease
         ulong zOrderAnchorWindowHandle,
         ulong backdropWindowHandle,
         DesktopShellGeneration shellGeneration,
-        string structuralFingerprint)
+        string structuralFingerprint,
+        ShellWindowBounds? attachmentBounds)
     {
         Capability = capability ?? throw new ArgumentNullException(nameof(capability));
         if (string.IsNullOrWhiteSpace(capability.AdapterId) ||
@@ -61,6 +62,7 @@ internal sealed record DesktopAttachmentLease
         BackdropWindowHandle = backdropWindowHandle;
         ShellGeneration = shellGeneration;
         StructuralFingerprint = structuralFingerprint ?? string.Empty;
+        AttachmentBounds = attachmentBounds;
     }
 
     public DesktopAttachmentCapability Capability { get; }
@@ -77,6 +79,13 @@ internal sealed record DesktopAttachmentLease
 
     public string StructuralFingerprint { get; }
 
+    /// <summary>
+    /// Captured bounds of the Shell parent for attachment kinds whose coordinate space must
+    /// match the Windows virtual desktop. The value is generation-scoped and must be
+    /// revalidated before a provisional Surface is activated.
+    /// </summary>
+    public ShellWindowBounds? AttachmentBounds { get; }
+
     public ulong ValidationWindowHandle => ParentWindowHandle;
 
     public static DesktopAttachmentLease CreateLegacy(
@@ -91,7 +100,8 @@ internal sealed record DesktopAttachmentLease
             0,
             0,
             new DesktopShellGeneration(shellWindowHandle, shellProcessId),
-            string.Empty);
+            string.Empty,
+            attachmentBounds: null);
 
     public static DesktopAttachmentLease CreateRaised(
         string adapterId,
@@ -100,7 +110,8 @@ internal sealed record DesktopAttachmentLease
         ulong backdropWindowHandle,
         ulong shellWindowHandle,
         uint shellProcessId,
-        string structuralFingerprint) =>
+        string structuralFingerprint,
+        ShellWindowBounds? attachmentBounds = null) =>
         new(
             new DesktopAttachmentCapability(
                 adapterId,
@@ -111,7 +122,8 @@ internal sealed record DesktopAttachmentLease
             zOrderAnchorWindowHandle,
             backdropWindowHandle,
             new DesktopShellGeneration(shellWindowHandle, shellProcessId),
-            structuralFingerprint);
+            structuralFingerprint,
+            attachmentBounds);
 
     internal bool HasCurrentShellGeneration()
     {

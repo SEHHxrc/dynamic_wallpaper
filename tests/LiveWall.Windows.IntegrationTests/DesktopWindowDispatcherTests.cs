@@ -71,7 +71,15 @@ public sealed class DesktopWindowDispatcherTests
             0);
 
         posted.Should().BeTrue();
-        (await signals.MoveNextAsync()).Should().BeTrue();
-        signals.Current.Kind.Should().Be(DesktopWindowSignalKind.TaskbarCreated);
+        DesktopWindowSignal? observed = null;
+        while (await signals.MoveNextAsync())
+        {
+            if (signals.Current.Kind == DesktopWindowSignalKind.TaskbarCreated)
+            {
+                observed = signals.Current;
+                break;
+            }
+        }
+        observed.Should().NotBeNull();
     }
 }

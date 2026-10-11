@@ -35,6 +35,29 @@ public sealed class PlaybackPolicyEvaluatorTests
     }
 
     [Fact]
+    public void SystemSuspendWinsBeforeEveryAutomaticPlaybackPolicy()
+    {
+        SystemStateSnapshot system = new(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            IsSystemSuspended: true);
+        WallpaperSessionSnapshot session = new(
+            UserPlaybackIntent.Play,
+            PlaybackState.Playing,
+            30,
+            false);
+
+        PlaybackDecision decision = evaluator.Evaluate(system, CreatePolicy(), session);
+
+        decision.TargetState.Should().Be(PlaybackState.Suspended);
+        decision.Reason.Should().Be(PlaybackDecisionReason.SystemSuspended);
+    }
+
+    [Fact]
     public void BatteryModeThrottlesWhenPauseOnBatteryIsDisabled()
     {
         SystemStateSnapshot system = new(false, false, false, false, true, false);

@@ -38,6 +38,23 @@ public sealed class NativeDesktopSurfaceFactoryTests
 
         await factory.ReplaceAsync([surface], [], CancellationToken.None);
         (await factory.IsVisibleAsync(surface, CancellationToken.None)).Should().BeTrue();
+        SurfaceRequest resizedRequest = request with
+        {
+            Bounds = new DisplayBounds(0, 0, 40, 24),
+        };
+        await factory.ResizeAsync(
+            surface,
+            resizedRequest,
+            DesktopAttachmentLease.CreateLegacy(
+                "test",
+                dispatcher.SignalWindowHandle,
+                shellWindowHandle: 1,
+                shellProcessId: checked((uint)Environment.ProcessId)),
+            CancellationToken.None);
+        DesktopNativeMethods.GetWindowRect(unchecked((nint)(long)surface), out NativeRect resizedBounds)
+            .Should().BeTrue();
+        (resizedBounds.Right - resizedBounds.Left).Should().Be(40);
+        (resizedBounds.Bottom - resizedBounds.Top).Should().Be(24);
 
         ulong replacement = await factory.CreateAsync(
             new SurfaceId("replacement-surface"),
@@ -175,6 +192,71 @@ public sealed class NativeDesktopSurfaceFactoryTests
     }
 
     [Fact]
+    public async Task RaisedSurfaceRegistersOnlyItsExactHwndForDiscoveryLifetime()
+    {
+        await using DesktopWindowDispatcher dispatcher = new();
+        await dispatcher.Ready;
+        await using NativeDesktopSurfaceFactory factory = new(
+            dispatcher,
+            shellGenerationValidator: static _ => true);
+        nint anchor = 0;
+        nint backdrop = 0;
+        ulong surface = 0;
+
+        try
+        {
+            (anchor, backdrop) = await dispatcher.InvokeAsync(
+                () => CreateRaisedTestAnchors(ToHandle(dispatcher.SignalWindowHandle)),
+                CancellationToken.None);
+            DesktopAttachmentLease lease = DesktopAttachmentLease.CreateRaised(
+                "raised-owned-registry-test",
+                dispatcher.SignalWindowHandle,
+                ToPublicHandle(anchor),
+                ToPublicHandle(backdrop),
+                shellWindowHandle: 1,
+                shellProcessId: checked((uint)Environment.ProcessId),
+                structuralFingerprint: "owned-registry-fingerprint");
+            surface = await factory.CreateAsync(
+                new SurfaceId("raised-owned-registry-surface"),
+                new SurfaceRequest(
+                    [new DisplayId("raised-display")],
+                    new DisplayBounds(0, 0, 32, 32),
+                    FitMode.Cover),
+                lease,
+                CancellationToken.None);
+
+            RaisedDesktopOwnedWindowRegistry.Contains(ToHandle(surface)).Should().BeTrue();
+
+            await factory.DestroyAsync(surface, CancellationToken.None);
+
+            RaisedDesktopOwnedWindowRegistry.Contains(ToHandle(surface)).Should().BeFalse();
+            surface = 0;
+        }
+        finally
+        {
+            if (surface != 0)
+            {
+                await factory.DestroyAsync(surface, CancellationToken.None);
+            }
+
+            await dispatcher.InvokeAsync(
+                () =>
+                {
+                    if (anchor != 0 && DesktopNativeMethods.IsWindow(anchor))
+                    {
+                        _ = DesktopNativeMethods.DestroyWindow(anchor);
+                    }
+
+                    if (backdrop != 0 && DesktopNativeMethods.IsWindow(backdrop))
+                    {
+                        _ = DesktopNativeMethods.DestroyWindow(backdrop);
+                    }
+                },
+                CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task ReplacementDoesNotTouchAnActiveSurfaceFromAnOlderShellGeneration()
     {
         await using DesktopWindowDispatcher dispatcher = new();
@@ -214,6 +296,190 @@ public sealed class NativeDesktopSurfaceFactoryTests
             "a stale-generation HWND must never be reused or mutated");
         await factory.DestroyAsync(previous, CancellationToken.None);
         await factory.DestroyAsync(provisional, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task RaisedSurfaceIsNotActivatedAfterParentCoordinateSpaceChanges()
+    {
+        await using DesktopWindowDispatcher dispatcher = new();
+        await dispatcher.Ready;
+        NativeRect reportedParentBounds = new()
+        {
+            Left = 0,
+            Top = 0,
+            Right = 1920,
+            Bottom = 1200,
+        };
+        await using NativeDesktopSurfaceFactory factory = new(
+            dispatcher,
+            shellGenerationValidator: static _ => true,
+            parentBoundsProvider: _ => reportedParentBounds);
+        nint anchor = 0;
+        nint backdrop = 0;
+        ulong surface = 0;
+
+        try
+        {
+            (anchor, backdrop) = await dispatcher.InvokeAsync(
+                () => CreateRaisedTestAnchors(ToHandle(dispatcher.SignalWindowHandle)),
+                CancellationToken.None);
+            DesktopAttachmentLease lease = DesktopAttachmentLease.CreateRaised(
+                "raised-test",
+                dispatcher.SignalWindowHandle,
+                ToPublicHandle(anchor),
+                ToPublicHandle(backdrop),
+                shellWindowHandle: 1,
+                shellProcessId: checked((uint)Environment.ProcessId),
+                structuralFingerprint: "landscape",
+                attachmentBounds: new ShellWindowBounds(0, 0, 1920, 1200));
+            surface = await factory.CreateAsync(
+                new SurfaceId("rotation-provisional"),
+                new SurfaceRequest(
+                    [new DisplayId("internal")],
+                    new DisplayBounds(0, 0, 1920, 1200),
+                    FitMode.Cover),
+                lease,
+                CancellationToken.None);
+
+            reportedParentBounds = new NativeRect
+            {
+                Left = 0,
+                Top = 0,
+                Right = 1200,
+                Bottom = 1920,
+            };
+            Func<Task> replace = () => factory.ReplaceAsync(
+                [surface],
+                [],
+                CancellationToken.None);
+
+            await replace.Should().ThrowAsync<DesktopAttachPointUnavailableException>()
+                .WithMessage("UnexpectedTopologyMutation:*parent bounds changed*");
+            (await factory.IsVisibleAsync(surface, CancellationToken.None)).Should().BeFalse();
+        }
+        finally
+        {
+            if (surface != 0)
+            {
+                await factory.DestroyAsync(surface, CancellationToken.None);
+            }
+
+            await dispatcher.InvokeAsync(
+                () =>
+                {
+                    if (anchor != 0 && DesktopNativeMethods.IsWindow(anchor))
+                    {
+                        _ = DesktopNativeMethods.DestroyWindow(anchor);
+                    }
+                    if (backdrop != 0 && DesktopNativeMethods.IsWindow(backdrop))
+                    {
+                        _ = DesktopNativeMethods.DestroyWindow(backdrop);
+                    }
+                },
+                CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task RaisedReplacementCanHideOldGeometryWhileNewSurfaceMatchesCurrentParent()
+    {
+        await using DesktopWindowDispatcher dispatcher = new();
+        await dispatcher.Ready;
+        NativeRect reportedParentBounds = new()
+        {
+            Left = 0,
+            Top = 0,
+            Right = 1920,
+            Bottom = 1200,
+        };
+        await using NativeDesktopSurfaceFactory factory = new(
+            dispatcher,
+            shellGenerationValidator: static _ => true,
+            parentBoundsProvider: _ => reportedParentBounds);
+        nint anchor = 0;
+        nint backdrop = 0;
+        ulong previous = 0;
+        ulong provisional = 0;
+
+        try
+        {
+            (anchor, backdrop) = await dispatcher.InvokeAsync(
+                () => CreateRaisedTestAnchors(ToHandle(dispatcher.SignalWindowHandle)),
+                CancellationToken.None);
+            uint processId = checked((uint)Environment.ProcessId);
+            DesktopAttachmentLease landscape = DesktopAttachmentLease.CreateRaised(
+                "raised-test",
+                dispatcher.SignalWindowHandle,
+                ToPublicHandle(anchor),
+                ToPublicHandle(backdrop),
+                shellWindowHandle: 1,
+                shellProcessId: processId,
+                structuralFingerprint: "landscape",
+                attachmentBounds: new ShellWindowBounds(0, 0, 1920, 1200));
+            previous = await factory.CreateAsync(
+                new SurfaceId("landscape-active"),
+                new SurfaceRequest(
+                    [new DisplayId("internal")],
+                    new DisplayBounds(0, 0, 1920, 1200),
+                    FitMode.Cover),
+                landscape,
+                CancellationToken.None);
+            await factory.ReplaceAsync([previous], [], CancellationToken.None);
+
+            reportedParentBounds = new NativeRect
+            {
+                Left = 0,
+                Top = 0,
+                Right = 1200,
+                Bottom = 1920,
+            };
+            DesktopAttachmentLease portrait = DesktopAttachmentLease.CreateRaised(
+                "raised-test",
+                dispatcher.SignalWindowHandle,
+                ToPublicHandle(anchor),
+                ToPublicHandle(backdrop),
+                shellWindowHandle: 1,
+                shellProcessId: processId,
+                structuralFingerprint: "portrait",
+                attachmentBounds: new ShellWindowBounds(0, 0, 1200, 1920));
+            provisional = await factory.CreateAsync(
+                new SurfaceId("portrait-provisional"),
+                new SurfaceRequest(
+                    [new DisplayId("internal")],
+                    new DisplayBounds(0, 0, 1200, 1920),
+                    FitMode.Cover),
+                portrait,
+                CancellationToken.None);
+
+            await factory.ReplaceAsync([provisional], [previous], CancellationToken.None);
+
+            (await factory.IsVisibleAsync(previous, CancellationToken.None)).Should().BeFalse();
+            (await factory.IsVisibleAsync(provisional, CancellationToken.None)).Should().BeTrue();
+        }
+        finally
+        {
+            if (previous != 0)
+            {
+                await factory.DestroyAsync(previous, CancellationToken.None);
+            }
+            if (provisional != 0)
+            {
+                await factory.DestroyAsync(provisional, CancellationToken.None);
+            }
+            await dispatcher.InvokeAsync(
+                () =>
+                {
+                    if (anchor != 0 && DesktopNativeMethods.IsWindow(anchor))
+                    {
+                        _ = DesktopNativeMethods.DestroyWindow(anchor);
+                    }
+                    if (backdrop != 0 && DesktopNativeMethods.IsWindow(backdrop))
+                    {
+                        _ = DesktopNativeMethods.DestroyWindow(backdrop);
+                    }
+                },
+                CancellationToken.None);
+        }
     }
 
     [Fact]

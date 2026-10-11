@@ -3,6 +3,14 @@ using LiveWall.Domain.Layouts;
 
 namespace LiveWall.Application.Layouts;
 
+public sealed class LayoutPlanningException(string errorCode, string message)
+    : InvalidOperationException(message)
+{
+    public string ErrorCode { get; } = !string.IsNullOrWhiteSpace(errorCode)
+        ? errorCode
+        : throw new ArgumentException("A layout planning error code is required.", nameof(errorCode));
+}
+
 public sealed class DefaultLayoutPlanner : ILayoutPlanner
 {
     public LayoutPlan CreatePlan(
@@ -56,6 +64,7 @@ public sealed class DefaultLayoutPlanner : ILayoutPlanner
             {
                 DisplayId[] displayIds = orderedAssignments.Select(item => item.DisplayId).ToArray();
                 DisplayBounds bounds = DisplayBounds.Union(displayIds.Select(id => displays[id].Bounds));
+                EnsureSpanDoesNotIntersectNonMembers(bounds, displayIds, displays.Values);
                 surfaces.Add(new PlannedSurface(
                     CreatePlanId("span", group.Key.WallpaperId, displayIds),
                     displayIds,
@@ -84,6 +93,35 @@ public sealed class DefaultLayoutPlanner : ILayoutPlanner
         return new LayoutPlan(
             topology.Revision,
             surfaces.OrderBy(surface => surface.PlanId, StringComparer.Ordinal).ToArray());
+    }
+
+    private static void EnsureSpanDoesNotIntersectNonMembers(
+        DisplayBounds spanBounds,
+        IReadOnlyCollection<DisplayId> spanDisplayIds,
+        IEnumerable<DisplayDescriptor> connectedDisplays)
+    {
+        HashSet<DisplayId> members = spanDisplayIds.ToHashSet();
+        DisplayDescriptor? conflictingDisplay = connectedDisplays.FirstOrDefault(display =>
+            !members.Contains(display.Id) && IntersectsWithPositiveArea(spanBounds, display.Bounds));
+
+        if (conflictingDisplay is not null)
+        {
+            throw new LayoutPlanningException(
+                "layout.span.intersects_non_member_display",
+                $"SpanLayoutIntersectsNonMemberDisplay: span '{string.Join("+", spanDisplayIds)}' " +
+                $"intersects connected display '{conflictingDisplay.Id}'.");
+        }
+    }
+
+    private static bool IntersectsWithPositiveArea(DisplayBounds left, DisplayBounds right)
+    {
+        long leftRight = (long)left.X + left.Width;
+        long leftBottom = (long)left.Y + left.Height;
+        long rightRight = (long)right.X + right.Width;
+        long rightBottom = (long)right.Y + right.Height;
+
+        return Math.Max((long)left.X, right.X) < Math.Min(leftRight, rightRight) &&
+            Math.Max((long)left.Y, right.Y) < Math.Min(leftBottom, rightBottom);
     }
 
     private static string CreatePlanId(

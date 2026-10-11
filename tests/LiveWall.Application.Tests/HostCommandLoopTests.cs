@@ -16,6 +16,9 @@ using LiveWall.Domain.Wallpapers;
 using LiveWall.Host.Bootstrap;
 using LiveWall.Host.CommandLoop;
 using LiveWall.Host.Orchestration;
+using LiveWall.Platform.Windows.Desktop;
+using LiveWall.Platform.Windows.Displays;
+using LiveWall.Platform.Windows.Power;
 
 namespace LiveWall.Application.Tests;
 
@@ -182,6 +185,993 @@ public sealed class HostCommandLoopTests
         active.Sessions.Should().HaveCount(2);
         runtime.Desktop.Replacements.Should().HaveCount(2).And.OnlyContain(replacement =>
             replacement.ProvisionalSurfaceIds.Count == 2);
+    }
+
+    [Fact]
+    public async Task DualDisplaySpanUsesOnePhysicalPixelRendererSurface()
+    {
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        DisplayTopology topology = CreateDualDisplayTopology() with { Revision = 1 };
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(topology),
+            CancellationToken.None);
+
+        HostCommandResult applied = await commandLoop.SendAsync(
+            new ApplyWallpaperCommand(
+                new WallpaperId("sample.wallpaper"),
+                topology.Displays.Select(display => display.Id).ToArray(),
+                LayoutMode.Span,
+                FitMode.Cover),
+            CancellationToken.None);
+        ApplyGenerationResult terminal = await commandLoop.WaitForApplyGenerationAsync(
+            applied.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession renderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        HostStateSnapshot state = await GetStateAsync(commandLoop);
+
+        terminal.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        state.Sessions.Should().ContainSingle();
+        state.Sessions.Single().Session.Displays.Should()
+            .BeEquivalentTo(topology.Displays.Select(display => display.Id));
+        renderer.Commands.OfType<AttachRendererSurface>().Should().ContainSingle()
+            .Which.ScaleFactor.Should().Be(1);
+        runtime.Desktop.Replacements.Should().ContainSingle()
+            .Which.ProvisionalSurfaceIds.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task FailedSpanReplacementPreservesPreviouslyCommittedSpan()
+    {
+        TestRuntime runtime = new(TimeSpan.FromMilliseconds(50), true, false);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        DisplayTopology topology = CreateDualDisplayTopology() with { Revision = 1 };
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(topology),
+            CancellationToken.None);
+        HostCommandResult applied = await commandLoop.SendAsync(
+            new ApplyWallpaperCommand(
+                new WallpaperId("sample.wallpaper"),
+                topology.Displays.Select(display => display.Id).ToArray(),
+                LayoutMode.Span,
+                FitMode.Cover),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            applied.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession committed = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        DisplayTopology changed = topology with
+        {
+            Revision = 2,
+            Displays = topology.Displays.Select(display =>
+                display.Id == new DisplayId("secondary")
+                    ? display with
+                    {
+                        Bounds = new DisplayBounds(
+                            display.Bounds.X,
+                            display.Bounds.Y + 100,
+                            display.Bounds.Width,
+                            display.Bounds.Height),
+                    }
+                    : display).ToArray(),
+        };
+        HostCommandResult change = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(changed),
+            CancellationToken.None);
+        ApplyGenerationResult failed = await commandLoop.WaitForApplyGenerationAsync(
+            change.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult reconciliation =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        HostStateSnapshot state = await GetStateAsync(commandLoop);
+
+        failed.State.Should().Be(ApplyGenerationTerminalState.Failed);
+        failed.FailureReason.Should().Be(ApplyFailureReason.FirstFrameTimeout);
+        reconciliation.TerminalState.Should().Be(DisplayReconciliationTerminalState.Failed);
+        state.Sessions.Should().ContainSingle()
+            .Which.Session.Id.Should().Be(committed.Id);
+        committed.IsDisposed.Should().BeFalse();
+        runtime.Desktop.Replacements.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task SpanIntersectionIntroducedByTopologyChangeFailsClosed()
+    {
+        DisplayId left = new("left");
+        DisplayId right = new("right");
+        DisplayId middle = new("middle");
+        DisplayDescriptor leftDisplay = new(
+            left,
+            "device-left",
+            new DisplayBounds(0, 0, 100, 100),
+            1,
+            60,
+            true);
+        DisplayDescriptor rightDisplay = new(
+            right,
+            "device-right",
+            new DisplayBounds(200, 0, 100, 100),
+            1,
+            60,
+            false);
+        DisplayTopology initialTopology = new(1, [leftDisplay, rightDisplay]);
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(initialTopology),
+            CancellationToken.None);
+        HostCommandResult applied = await commandLoop.SendAsync(
+            new ApplyWallpaperCommand(
+                new WallpaperId("sample.wallpaper"),
+                [left, right],
+                LayoutMode.Span,
+                FitMode.Cover),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            applied.State!.Generation,
+            CancellationToken.None);
+        HostStateSnapshot before = await GetStateAsync(commandLoop);
+
+        DisplayDescriptor middleDisplay = new(
+            middle,
+            "device-middle",
+            new DisplayBounds(100, 20, 100, 50),
+            1,
+            60,
+            false);
+        HostCommandResult rejected = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [leftDisplay, middleDisplay, rightDisplay])),
+            CancellationToken.None);
+        DisplayReconciliationResult reconciliation =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        HostStateSnapshot after = await GetStateAsync(commandLoop);
+
+        rejected.Accepted.Should().BeFalse();
+        rejected.ErrorCode.Should().Be("layout.span.intersects_non_member_display");
+        reconciliation.TerminalState.Should().Be(DisplayReconciliationTerminalState.Failed);
+        reconciliation.FailureReason.Should().Be(ApplyFailureReason.TopologyFailed);
+        after.DisplayTopology!.Revision.Should().Be(1);
+        after.Sessions.Select(session => session.Session.Id).Should()
+            .Equal(before.Sessions.Select(session => session.Session.Id));
+        runtime.Provider.SessionCount.Should().Be(1);
+        runtime.Desktop.Replacements.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task DisplayDisconnectRetiresOnlyThatSessionAndReconnectRestoresOfflineAssignment()
+    {
+        TestRuntime runtime = new(true, true, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateDualDisplayTopology()),
+            CancellationToken.None);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            new ApplyWallpaperCommand(
+                new WallpaperId("sample.wallpaper"),
+                [new DisplayId("primary"), new DisplayId("secondary")],
+                LayoutMode.PerDisplay,
+                FitMode.Cover),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession originalPrimary = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        FakeRendererSession originalSecondary = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+
+        HostCommandResult disconnectedCommand = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                3,
+                [CreateDualDisplayTopology().Displays.Single(display => display.IsPrimary)])),
+            CancellationToken.None);
+        DisplayReconciliationResult disconnectedResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(3, CancellationToken.None);
+        await WaitUntilAsync(() => originalSecondary.IsDisposed, CancellationToken.None);
+        HostStateSnapshot disconnected = await GetStateAsync(commandLoop);
+
+        disconnected.Sessions.Should().ContainSingle()
+            .Which.Session.Id.Should().Be(originalPrimary.Id);
+        disconnected.Assignments.Should().HaveCount(2);
+        originalPrimary.IsDisposed.Should().BeFalse();
+        disconnectedCommand.Accepted.Should().BeTrue();
+        disconnectedResult.TerminalState.Should()
+            .Be(DisplayReconciliationTerminalState.Succeeded);
+        disconnectedResult.Kind.Should().Be(DisplayReconciliationKind.Reconfigure);
+
+        HostCommandResult reconnected = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateDualDisplayTopology() with { Revision = 4 }),
+            CancellationToken.None);
+        ApplyGenerationResult terminal = await commandLoop.WaitForApplyGenerationAsync(
+            reconnected.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult reconnectedResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(4, CancellationToken.None);
+        HostStateSnapshot restored = await GetStateAsync(commandLoop);
+
+        terminal.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        terminal.Timeline.Count(entry =>
+            entry.Phase == ApplyGenerationPhase.FirstFramePresented).Should().Be(1);
+        restored.Sessions.Should().HaveCount(2);
+        restored.Sessions.Should().Contain(item => item.Session.Id == originalPrimary.Id);
+        restored.Assignments.Should().HaveCount(2);
+        reconnectedResult.TerminalState.Should()
+            .Be(DisplayReconciliationTerminalState.Succeeded);
+        reconnectedResult.Timeline.Should().Contain(entry =>
+            entry.Phase == DisplayReconciliationPhase.SurfacesReplaced);
+    }
+
+    [Fact]
+    public async Task DisplayBoundsChangeAtomicallyReplacesOnlyAffectedSession()
+    {
+        TestRuntime runtime = new(true, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession original = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        HostCommandResult changed = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(-100, 50, 2560, 1440),
+                }])),
+            CancellationToken.None);
+        ApplyGenerationResult terminal = await commandLoop.WaitForApplyGenerationAsync(
+            changed.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult reconciliation =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        await WaitUntilAsync(() => original.IsDisposed, CancellationToken.None);
+        HostStateSnapshot state = await GetStateAsync(commandLoop);
+
+        terminal.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        terminal.Timeline.Count(entry =>
+            entry.Phase == ApplyGenerationPhase.SurfacesReplaced).Should().Be(1);
+        state.Sessions.Should().ContainSingle();
+        state.Sessions[0].Session.Id.Should().NotBe(original.Id);
+        runtime.Desktop.Replacements.Last().ReplacedSurfaceIds
+            .Should().Equal(new SurfaceId("surface-1"));
+        reconciliation.TerminalState.Should()
+            .Be(DisplayReconciliationTerminalState.Succeeded);
+        reconciliation.HostGeneration.Should().Be(changed.State.Generation);
+        reconciliation.Timeline.Should().Contain(entry =>
+            entry.Phase == DisplayReconciliationPhase.ActiveSurfacesResized &&
+            entry.Outcome == ApplyStageOutcome.Success);
+        original.Commands.Any(command => command is SetRendererBounds bounds &&
+                bounds.Generation == changed.State.Generation &&
+                bounds.Bounds == new DisplayBounds(-100, 50, 2560, 1440))
+            .Should().BeTrue();
+        runtime.Desktop.ResizedSurfaces.Should().ContainSingle(resize =>
+            resize.SurfaceId == new SurfaceId("surface-1") &&
+            resize.Request.Bounds == new DisplayBounds(-100, 50, 2560, 1440));
+    }
+
+    [Fact]
+    public async Task DuplicateDisplayTopologyRevisionIsRejectedWithoutChangingState()
+    {
+        TestRuntime runtime = new();
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+
+        HostCommandResult duplicate = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateTopology()),
+            CancellationToken.None);
+
+        duplicate.Accepted.Should().BeFalse();
+        duplicate.ErrorCode.Should().Be("host.display.topology_stale");
+        (await GetStateAsync(commandLoop)).DisplayTopology!.Revision.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task CompletedDisplayReconciliationJournalIsBounded()
+    {
+        TestRuntime runtime = new();
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+
+        for (long revision = 2; revision <= 35; revision++)
+        {
+            DisplayDescriptor display = CreateTopology().Displays[0] with
+            {
+                RefreshRateHz = revision % 2 == 0 ? 120 : 60,
+            };
+            await commandLoop.SendAsync(
+                new DisplayTopologyChangedCommand(new DisplayTopology(revision, [display])),
+                CancellationToken.None);
+            DisplayReconciliationResult result =
+                await commandLoop.WaitForDisplayReconciliationAsync(
+                    revision,
+                    CancellationToken.None);
+            result.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        }
+
+        commandLoop.DisplayReconciliationDiagnosticsCountForTests.Should().Be(32);
+    }
+
+    [Fact]
+    public async Task RefreshRateOnlyTopologyChangeCompletesAsNoChange()
+    {
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession renderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with { RefreshRateHz = 120 }])),
+            CancellationToken.None);
+        DisplayReconciliationResult result =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+
+        result.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        result.Kind.Should().Be(DisplayReconciliationKind.NoChange);
+        result.HostGeneration.Should().BeNull();
+        renderer.IsDisposed.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task PrimaryFlagOnlyTopologyChangePreservesDualDisplaySessionsWithoutReplace()
+    {
+        TestRuntime runtime = new(true, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        DisplayTopology initialTopology = CreateDualDisplayTopology() with { Revision = 1 };
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(initialTopology),
+            CancellationToken.None);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            new ApplyWallpaperCommand(
+                new WallpaperId("sample.wallpaper"),
+                initialTopology.Displays.Select(display => display.Id).ToArray(),
+                LayoutMode.PerDisplay,
+                FitMode.Cover),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        HostStateSnapshot before = await GetStateAsync(commandLoop);
+        SessionId[] beforeSessionIds = before.Sessions
+            .Select(session => session.Session.Id)
+            .OrderBy(id => id.Value, StringComparer.Ordinal)
+            .ToArray();
+        FakeRendererSession firstRenderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        FakeRendererSession secondRenderer = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        int replacementsBefore = runtime.Desktop.Replacements.Count;
+
+        DisplayTopology switched = initialTopology with
+        {
+            Revision = 2,
+            Displays = initialTopology.Displays.Select(display => display with
+            {
+                IsPrimary = display.Id == new DisplayId("secondary"),
+            }).ToArray(),
+        };
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(switched),
+            CancellationToken.None);
+        DisplayReconciliationResult result =
+            await commandLoop.WaitForDisplayReconciliationAsync(
+                switched.Revision,
+                CancellationToken.None);
+        HostStateSnapshot after = await GetStateAsync(commandLoop);
+
+        result.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        result.Kind.Should().Be(DisplayReconciliationKind.NoChange);
+        result.HostGeneration.Should().BeNull();
+        result.Timeline.Should().Contain(entry =>
+            entry.Phase == DisplayReconciliationPhase.PlanCreated &&
+            entry.Detail != null &&
+            entry.Detail.Contains(
+                nameof(DisplayTopologyChangeReason.PrimaryChanged),
+                StringComparison.Ordinal));
+        result.Timeline.Should().NotContain(entry =>
+            entry.Phase == DisplayReconciliationPhase.SurfacesReplaced);
+        after.Sessions.Select(session => session.Session.Id)
+            .OrderBy(id => id.Value, StringComparer.Ordinal)
+            .Should().Equal(beforeSessionIds);
+        runtime.Desktop.Replacements.Should().HaveCount(replacementsBefore);
+        firstRenderer.IsDisposed.Should().BeFalse();
+        secondRenderer.IsDisposed.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ScaleOnlyTopologyChangeReplacesAffectedDisplayAndPreservesOtherSession()
+    {
+        TestRuntime runtime = new(true, true, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        DisplayTopology initialTopology = CreateDualDisplayTopology() with { Revision = 1 };
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(initialTopology),
+            CancellationToken.None);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            new ApplyWallpaperCommand(
+                new WallpaperId("sample.wallpaper"),
+                initialTopology.Displays.Select(display => display.Id).ToArray(),
+                LayoutMode.PerDisplay,
+                FitMode.Cover),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        HostStateSnapshot before = await GetStateAsync(commandLoop);
+        DisplayId primaryId = new("primary");
+        DisplayId secondaryId = new("secondary");
+        SessionId primarySessionId = before.Sessions.Single(session =>
+            session.Session.Displays.Contains(primaryId)).Session.Id;
+        SessionId secondarySessionId = before.Sessions.Single(session =>
+            session.Session.Displays.Contains(secondaryId)).Session.Id;
+        FakeRendererSession primaryRenderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        FakeRendererSession secondaryRenderer = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        int replacementsBefore = runtime.Desktop.Replacements.Count;
+
+        DisplayTopology scaled = initialTopology with
+        {
+            Revision = 2,
+            Displays = initialTopology.Displays.Select(display =>
+                display.Id == secondaryId
+                    ? display with { ScaleFactor = 1.75 }
+                    : display).ToArray(),
+        };
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(scaled),
+            CancellationToken.None);
+        DisplayReconciliationResult result =
+            await commandLoop.WaitForDisplayReconciliationAsync(
+                scaled.Revision,
+                CancellationToken.None);
+        await WaitUntilAsync(() => secondaryRenderer.IsDisposed, CancellationToken.None);
+        HostStateSnapshot after = await GetStateAsync(commandLoop);
+
+        result.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        result.Kind.Should().Be(DisplayReconciliationKind.Reconfigure);
+        result.Timeline.Should().ContainSingle(entry =>
+            entry.Phase == DisplayReconciliationPhase.SurfacesReplaced);
+        after.Sessions.Should().HaveCount(2);
+        after.Sessions.Single(session => session.Session.Displays.Contains(primaryId))
+            .Session.Id.Should().Be(primarySessionId);
+        after.Sessions.Single(session => session.Session.Displays.Contains(secondaryId))
+            .Session.Id.Should().NotBe(secondarySessionId);
+        runtime.Desktop.Replacements.Should().HaveCount(replacementsBefore + 1);
+        primaryRenderer.IsDisposed.Should().BeFalse();
+        secondaryRenderer.IsDisposed.Should().BeTrue();
+        runtime.Provider.SessionCount.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ZeroDisplayTopologySuspendsSessionsAndPreservesAssignments()
+    {
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession renderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(2, [])),
+            CancellationToken.None);
+        DisplayReconciliationResult result =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        await WaitUntilAsync(() => renderer.IsDisposed, CancellationToken.None);
+        HostStateSnapshot suspended = await GetStateAsync(commandLoop);
+
+        result.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        result.Kind.Should().Be(DisplayReconciliationKind.Suspend);
+        suspended.Sessions.Should().BeEmpty();
+        suspended.Assignments.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task ZeroDisplayRoundTripPreservesAssignmentsAndRestoresOriginalDisplaysAtomically()
+    {
+        TestRuntime runtime = new(true, true, true, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        DisplayTopology initialTopology = CreateDualDisplayTopology() with { Revision = 1 };
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(initialTopology),
+            CancellationToken.None);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            new ApplyWallpaperCommand(
+                new WallpaperId("sample.wallpaper"),
+                initialTopology.Displays.Select(display => display.Id).ToArray(),
+                LayoutMode.PerDisplay,
+                FitMode.Cover),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession first = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        FakeRendererSession second = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(2, [])),
+            CancellationToken.None);
+        DisplayReconciliationResult suspendedResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        await WaitUntilAsync(
+            () => first.IsDisposed && second.IsDisposed,
+            CancellationToken.None);
+        HostStateSnapshot suspended = await GetStateAsync(commandLoop);
+
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(initialTopology with { Revision = 3 }),
+            CancellationToken.None);
+        DisplayReconciliationResult resumedResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(3, CancellationToken.None);
+        HostStateSnapshot resumed = await GetStateAsync(commandLoop);
+
+        suspendedResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        suspendedResult.Kind.Should().Be(DisplayReconciliationKind.Suspend);
+        suspended.Sessions.Should().BeEmpty();
+        suspended.Assignments.Should().HaveCount(2);
+        resumedResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        resumedResult.Kind.Should().Be(DisplayReconciliationKind.Reconfigure);
+        resumedResult.Timeline.Count(entry =>
+            entry.Phase == DisplayReconciliationPhase.SurfacesReplaced).Should().Be(1);
+        resumed.Sessions.Should().HaveCount(2);
+        resumed.Assignments.Select(item => item.DisplayId)
+            .Should().BeEquivalentTo(initialTopology.Displays.Select(item => item.Id));
+        runtime.Desktop.Replacements.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task FailedTopologyPreparationKeepsPreviouslyCommittedSession()
+    {
+        TestRuntime runtime = new(TimeSpan.FromMilliseconds(50), true, false);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession original = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        HostCommandResult changed = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(0, 0, 2560, 1440),
+                }])),
+            CancellationToken.None);
+        ApplyGenerationResult apply = await commandLoop.WaitForApplyGenerationAsync(
+            changed.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult reconciliation =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        HostStateSnapshot state = await GetStateAsync(commandLoop);
+
+        apply.State.Should().Be(ApplyGenerationTerminalState.Failed);
+        reconciliation.TerminalState.Should().Be(DisplayReconciliationTerminalState.Failed);
+        reconciliation.FailureReason.Should().Be(ApplyFailureReason.FirstFrameTimeout);
+        state.Sessions.Should().ContainSingle()
+            .Which.Session.Id.Should().Be(original.Id);
+        original.IsDisposed.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task TransientShellTopologyMutationIsRetriedBeforeReconciliationFails()
+    {
+        TestRuntime runtime = new(true, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        runtime.Desktop.TransientTopologyFailuresRemaining = 1;
+
+        HostCommandResult changed = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(0, 0, 2560, 1440),
+                }])),
+            CancellationToken.None);
+        ApplyGenerationResult apply = await commandLoop.WaitForApplyGenerationAsync(
+            changed.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult reconciliation =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+
+        apply.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        reconciliation.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        reconciliation.Timeline.Should().Contain(entry =>
+            entry.Phase == DisplayReconciliationPhase.PreparationRetryScheduled &&
+            entry.FailureReason == ApplyFailureReason.TopologyFailed);
+        reconciliation.Timeline.Should().Contain(entry =>
+            entry.Phase == DisplayReconciliationPhase.PreparationRetryStarted);
+        runtime.Desktop.EnsureTopologyCallCount.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ParentCoordinateMutationAtReplaceAbandonsProvisionalBatchAndRetries()
+    {
+        TestRuntime runtime = new(true, true, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession original = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        runtime.Desktop.TransientTopologyFailuresRemaining = 3;
+        runtime.Desktop.TransientReplacementFailuresRemaining = 1;
+
+        HostCommandResult changed = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(0, 0, 1080, 1920),
+                }])),
+            CancellationToken.None);
+        ApplyGenerationResult apply = await commandLoop.WaitForApplyGenerationAsync(
+            changed.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult reconciliation =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        FakeRendererSession abandoned = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        FakeRendererSession committed = await runtime.Provider.WaitForSessionAsync(
+            2,
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => abandoned.IsDisposed && original.IsDisposed,
+            CancellationToken.None);
+        HostStateSnapshot state = await GetStateAsync(commandLoop);
+
+        apply.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        reconciliation.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        reconciliation.Timeline.Should().Contain(entry =>
+            entry.Phase == DisplayReconciliationPhase.PreparationRetryScheduled &&
+            entry.FailureReason == ApplyFailureReason.TopologyFailed &&
+            entry.Detail!.Contains("coordinate space", StringComparison.OrdinalIgnoreCase));
+        reconciliation.Timeline.Should().Contain(entry =>
+            entry.Phase == DisplayReconciliationPhase.PreparationRetryStarted);
+        abandoned.IsDisposed.Should().BeTrue();
+        state.Sessions.Should().ContainSingle()
+            .Which.Session.Id.Should().Be(committed.Id);
+        runtime.Desktop.Replacements.Should().HaveCount(3);
+        runtime.Desktop.EnsureTopologyCallCount.Should().Be(6,
+            "preparation and Replace mutation retries have independent bounded budgets");
+    }
+
+    [Fact]
+    public async Task NewerTopologyCancelsStalePreparationAndCommitsOnlyLatestBounds()
+    {
+        TestRuntime runtime = new(true, false, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+
+        HostCommandResult stale = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(10, 0, 1920, 1080),
+                }])),
+            CancellationToken.None);
+        FakeRendererSession staleRenderer = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        HostCommandResult latest = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                3,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(-100, 50, 2560, 1440),
+                }])),
+            CancellationToken.None);
+
+        ApplyGenerationResult staleTerminal = await commandLoop.WaitForApplyGenerationAsync(
+            stale.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult staleReconciliation =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        ApplyGenerationResult latestTerminal = await commandLoop.WaitForApplyGenerationAsync(
+            latest.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult latestReconciliation =
+            await commandLoop.WaitForDisplayReconciliationAsync(3, CancellationToken.None);
+        await WaitUntilAsync(() => staleRenderer.IsDisposed, CancellationToken.None);
+
+        staleTerminal.State.Should().Be(ApplyGenerationTerminalState.Cancelled);
+        staleTerminal.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+        latestTerminal.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        staleReconciliation.TerminalState.Should()
+            .Be(DisplayReconciliationTerminalState.Cancelled);
+        staleReconciliation.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+        latestReconciliation.TerminalState.Should()
+            .Be(DisplayReconciliationTerminalState.Succeeded);
+        runtime.Desktop.Replacements.Should().HaveCount(2);
+        runtime.Desktop.Replacements.Last().ProvisionalSurfaceIds
+            .Should().Equal(new SurfaceId("surface-3"));
+    }
+
+    [Fact]
+    public async Task NewerNoChangeTopologyImmediatelyCancelsStalePreparation()
+    {
+        TestRuntime runtime = new(true, false);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession committed = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        HostCommandResult stale = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(0, 0, 2560, 1440),
+                }])),
+            CancellationToken.None);
+        FakeRendererSession provisional = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateTopology() with { Revision = 3 }),
+            CancellationToken.None);
+
+        ApplyGenerationResult staleApply = await commandLoop.WaitForApplyGenerationAsync(
+            stale.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult staleResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        DisplayReconciliationResult finalResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(3, CancellationToken.None);
+        await WaitUntilAsync(() => provisional.IsDisposed, CancellationToken.None);
+        HostStateSnapshot finalState = await GetStateAsync(commandLoop);
+
+        staleApply.State.Should().Be(ApplyGenerationTerminalState.Cancelled);
+        staleApply.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+        staleResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Cancelled);
+        staleResult.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+        finalResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        finalResult.Kind.Should().Be(DisplayReconciliationKind.NoChange);
+        committed.IsDisposed.Should().BeFalse();
+        finalState.Sessions.Should().ContainSingle()
+            .Which.Session.Id.Should().Be(committed.Id);
+        runtime.Desktop.Replacements.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task NewerSuspendTopologyCancelsStalePreparationAndRetiresCommittedSession()
+    {
+        TestRuntime runtime = new(true, false);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession committed = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        HostCommandResult stale = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(0, 0, 2560, 1440),
+                }])),
+            CancellationToken.None);
+        FakeRendererSession provisional = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(3, [])),
+            CancellationToken.None);
+
+        ApplyGenerationResult staleApply = await commandLoop.WaitForApplyGenerationAsync(
+            stale.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult staleResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        DisplayReconciliationResult suspendResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(3, CancellationToken.None);
+        await WaitUntilAsync(
+            () => committed.IsDisposed && provisional.IsDisposed,
+            CancellationToken.None);
+        HostStateSnapshot suspended = await GetStateAsync(commandLoop);
+
+        staleApply.State.Should().Be(ApplyGenerationTerminalState.Cancelled);
+        staleApply.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+        staleResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Cancelled);
+        suspendResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        suspendResult.Kind.Should().Be(DisplayReconciliationKind.Suspend);
+        suspended.Sessions.Should().BeEmpty();
+        suspended.Assignments.Should().ContainSingle();
+        runtime.Desktop.Replacements.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task NewerNoChangeTopologyInterruptsTransientRetryDelay()
+    {
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+        runtime.Desktop.TransientTopologyFailuresRemaining = 10;
+
+        HostCommandResult stale = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(0, 0, 2560, 1440),
+                }])),
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => runtime.Desktop.EnsureTopologyCallCount >= 2,
+            CancellationToken.None);
+        int callsBeforeSupersede = runtime.Desktop.EnsureTopologyCallCount;
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateTopology() with { Revision = 3 }),
+            CancellationToken.None);
+
+        ApplyGenerationResult staleApply = await commandLoop.WaitForApplyGenerationAsync(
+            stale.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult staleResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        DisplayReconciliationResult finalResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(3, CancellationToken.None);
+        await Task.Delay(450);
+
+        staleApply.State.Should().Be(ApplyGenerationTerminalState.Cancelled);
+        staleApply.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+        staleResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Cancelled);
+        finalResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        finalResult.Kind.Should().Be(DisplayReconciliationKind.NoChange);
+        // The superseding no-change revision restores the transition-resized active Surface
+        // through the generation-validated fast path. It must not start another full Raised
+        // discovery, and the stale preparation retry must remain cancelled.
+        runtime.Desktop.EnsureTopologyCallCount.Should().Be(callsBeforeSupersede);
+    }
+
+    [Fact]
+    public async Task NewerTopologyQueuedWithFirstFramePreventsStalePreparedReplace()
+    {
+        TestRuntime runtime = new(true, true);
+        GatedSessionCoordinator? gate = null;
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop(inner =>
+            gate = new GatedSessionCoordinator(inner, blockedPrepareCall: 2));
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult initial = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            initial.State!.Generation,
+            CancellationToken.None);
+
+        HostCommandResult stale = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(new DisplayTopology(
+                2,
+                [CreateTopology().Displays[0] with
+                {
+                    Bounds = new DisplayBounds(0, 0, 2560, 1440),
+                }])),
+            CancellationToken.None);
+        await gate!.Prepared.WaitAsync(CancellationToken.None);
+        FakeRendererSession provisional = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateTopology() with { Revision = 3 }),
+            CancellationToken.None);
+        gate.Release();
+        ApplyGenerationResult staleApply = await commandLoop.WaitForApplyGenerationAsync(
+            stale.State!.Generation,
+            CancellationToken.None);
+        DisplayReconciliationResult staleResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(2, CancellationToken.None);
+        DisplayReconciliationResult finalResult =
+            await commandLoop.WaitForDisplayReconciliationAsync(3, CancellationToken.None);
+        await WaitUntilAsync(() => provisional.IsDisposed, CancellationToken.None);
+
+        staleApply.State.Should().Be(ApplyGenerationTerminalState.Cancelled);
+        staleApply.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+        staleResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Cancelled);
+        finalResult.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+        finalResult.Kind.Should().Be(DisplayReconciliationKind.NoChange);
+        runtime.Desktop.Replacements.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task DisplayTopologyForwarderReportsClosedHostChannel()
+    {
+        TestRuntime runtime = new(true);
+        HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        DisplayTopologyEventForwarder forwarder = new(commandLoop);
+        DisplayTopologyForwardingFailure? observed = null;
+        forwarder.ForwardingFailed += (_, failure) => observed = failure;
+        await commandLoop.DisposeAsync();
+
+        bool forwarded = forwarder.TryForward(CreateTopology());
+
+        forwarded.Should().BeFalse();
+        forwarder.LastFailure.Should().NotBeNull();
+        forwarder.LastFailure!.Topology.Should().BeEquivalentTo(CreateTopology());
+        observed.Should().Be(forwarder.LastFailure);
+        observed!.Reason.Should().Contain("closed");
     }
 
     [Fact]
@@ -470,6 +1460,51 @@ public sealed class HostCommandLoopTests
     }
 
     [Fact]
+    public async Task ProvisionalShutdownFailureDoesNotHideThePrimaryApplyFailure()
+    {
+        TestRuntime runtime = new(TimeSpan.FromSeconds(2), true, false);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateDualDisplayTopology()),
+            CancellationToken.None);
+
+        HostCommandResult accepted = await commandLoop.SendAsync(
+            new ApplyWallpaperCommand(
+                new WallpaperId("sample.wallpaper"),
+                [new DisplayId("primary"), new DisplayId("secondary")],
+                LayoutMode.PerDisplay,
+                FitMode.Cover),
+            CancellationToken.None);
+        FakeRendererSession secondRenderer = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        secondRenderer.FailShutdownSend = true;
+        secondRenderer.FailBeforeFirstFrame();
+
+        ApplyGenerationResult terminal = await commandLoop.WaitForApplyGenerationAsync(
+            accepted.State!.Generation,
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => secondRenderer.IsDisposed &&
+                runtime.Desktop.DestroyedSurfaces.Count == 2,
+            CancellationToken.None);
+
+        terminal.State.Should().Be(ApplyGenerationTerminalState.Failed);
+        terminal.TerminalPhase.Should().Be(ApplyGenerationPhase.FirstFramePresented);
+        terminal.FailureReason.Should().Be(ApplyFailureReason.FirstFrameRejected);
+        commandLoop.GetApplyTimelineForDiagnostics(terminal.Generation).Should().Contain(entry =>
+            entry.Phase == ApplyGenerationPhase.ShutdownCompleted &&
+            entry.Outcome == ApplyStageOutcome.Rejected &&
+            entry.FailureReason == ApplyFailureReason.ShutdownFailed);
+        commandLoop.GetApplyTimelineForDiagnostics(terminal.Generation).Should().Contain(entry =>
+            entry.SurfaceOrdinal == 2 &&
+            entry.Phase == ApplyGenerationPhase.CleanupVerified &&
+            entry.Outcome == ApplyStageOutcome.Success);
+        (await GetStateAsync(commandLoop)).Sessions.Should().BeEmpty();
+        runtime.Desktop.Replacements.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task ApplyPublishesSessionOnlyAfterFirstFrame()
     {
         TestRuntime runtime = new(false);
@@ -569,6 +1604,133 @@ public sealed class HostCommandLoopTests
     }
 
     [Fact]
+    public async Task DualDisplayPartialReplacementFailureKeepsBothCommittedSessionsAndAllowsRetry()
+    {
+        TestRuntime runtime = new(true, true, true, false, true, true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateDualDisplayTopology()),
+            CancellationToken.None);
+        ApplyWallpaperCommand apply = new(
+            new WallpaperId("sample.wallpaper"),
+            [new DisplayId("primary"), new DisplayId("secondary")],
+            LayoutMode.PerDisplay,
+            FitMode.Cover);
+
+        HostCommandResult acceptedA = await commandLoop.SendAsync(apply, CancellationToken.None);
+        ApplyGenerationResult resultA = await commandLoop.WaitForApplyGenerationAsync(
+            acceptedA.State!.Generation,
+            CancellationToken.None);
+        HostStateSnapshot stateA = await GetStateAsync(commandLoop);
+        SessionId[] sessionIdsA = stateA.Sessions.Select(item => item.Session.Id).ToArray();
+
+        HostCommandResult acceptedB = await commandLoop.SendAsync(apply, CancellationToken.None);
+        FakeRendererSession failedB = await runtime.Provider.WaitForSessionAsync(
+            3,
+            CancellationToken.None);
+        failedB.FailBeforeFirstFrame();
+        ApplyGenerationResult resultB = await commandLoop.WaitForApplyGenerationAsync(
+            acceptedB.State!.Generation,
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => runtime.Provider.SessionCount == 4 &&
+                runtime.Desktop.DestroyedSurfaces.Contains(new SurfaceId("surface-4")),
+            CancellationToken.None);
+        HostStateSnapshot stateB = await GetStateAsync(commandLoop);
+
+        resultA.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        resultB.State.Should().Be(ApplyGenerationTerminalState.Failed);
+        resultB.TerminalPhase.Should().Be(ApplyGenerationPhase.FirstFramePresented);
+        stateB.Generation.Should().Be(2);
+        stateB.Sessions.Select(item => item.Session.Id).Should().BeEquivalentTo(sessionIdsA);
+        stateB.Sessions.Should().OnlyContain(item => item.Session.Generation == 1);
+        runtime.Desktop.Replacements.Should().ContainSingle();
+        runtime.Desktop.DestroyedSurfaces.Should().Contain(
+            [new SurfaceId("surface-3"), new SurfaceId("surface-4")]);
+        runtime.Desktop.DestroyedSurfaces.Should().NotContain(
+            [new SurfaceId("surface-1"), new SurfaceId("surface-2")]);
+
+        HostCommandResult acceptedC = await commandLoop.SendAsync(apply, CancellationToken.None);
+        ApplyGenerationResult resultC = await commandLoop.WaitForApplyGenerationAsync(
+            acceptedC.State!.Generation,
+            CancellationToken.None);
+        HostStateSnapshot stateC = await GetStateAsync(commandLoop);
+
+        resultC.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        stateC.Generation.Should().Be(3);
+        stateC.Sessions.Should().HaveCount(2);
+        stateC.Sessions.Select(item => item.Session.Id).Should().NotIntersectWith(sessionIdsA);
+        runtime.Desktop.Replacements.Should().HaveCount(2);
+        await WaitUntilAsync(
+            () => runtime.Desktop.DestroyedSurfaces.Contains(new SurfaceId("surface-1")) &&
+                runtime.Desktop.DestroyedSurfaces.Contains(new SurfaceId("surface-2")),
+            CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task OldDualDisplayRetirementTimeoutDoesNotRollbackNewCommittedSessions()
+    {
+        TestRuntime runtime = new(
+            TimeSpan.FromSeconds(2),
+            ApplyDeadlineBudget.Default,
+            new SessionRetirementPolicy(
+                TimeSpan.FromMilliseconds(30),
+                TimeSpan.FromMilliseconds(30)),
+            true,
+            true,
+            true,
+            true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateDualDisplayTopology()),
+            CancellationToken.None);
+        ApplyWallpaperCommand apply = new(
+            new WallpaperId("sample.wallpaper"),
+            [new DisplayId("primary"), new DisplayId("secondary")],
+            LayoutMode.PerDisplay,
+            FitMode.Cover);
+
+        HostCommandResult acceptedA = await commandLoop.SendAsync(apply, CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            acceptedA.State!.Generation,
+            CancellationToken.None);
+        HostStateSnapshot stateA = await GetStateAsync(commandLoop);
+        FakeRendererSession secondA = await runtime.Provider.WaitForSessionAsync(
+            1,
+            CancellationToken.None);
+        secondA.SuppressShutdownCompleted = true;
+
+        HostCommandResult acceptedB = await commandLoop.SendAsync(apply, CancellationToken.None);
+        ApplyGenerationResult resultB = await commandLoop.WaitForApplyGenerationAsync(
+            acceptedB.State!.Generation,
+            CancellationToken.None);
+        HostStateSnapshot stateB = await GetStateAsync(commandLoop);
+        SessionRetirementBatchResult retiredA =
+            await commandLoop.WaitForSessionRetirementsForDiagnosticsAsync(
+                stateA.Sessions.Select(item => item.Session.Id).ToArray(),
+                CancellationToken.None);
+        HostStateSnapshot afterRetirementTimeout = await GetStateAsync(commandLoop);
+
+        resultB.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+        stateB.Sessions.Should().HaveCount(2);
+        stateB.Sessions.Should().OnlyContain(item => item.Session.Generation == 2);
+        afterRetirementTimeout.Sessions.Select(item => item.Session.Id)
+            .Should().BeEquivalentTo(stateB.Sessions.Select(item => item.Session.Id));
+        retiredA.Sessions.Should().HaveCount(2);
+        retiredA.Sessions.Single(item => item.SurfaceOrdinal == 1).Graceful.Should().BeTrue();
+        SessionRetirementResult timedOut = retiredA.Sessions.Single(item =>
+            item.SurfaceOrdinal == 2);
+        timedOut.Graceful.Should().BeFalse();
+        timedOut.Issues.Should().Contain(item =>
+            item.Kind == SessionRetirementIssueKind.ShutdownTimeout);
+        timedOut.OwnedResourcesCleaned.Should().BeTrue();
+        runtime.Desktop.DestroyedSurfaces.Should().Contain(
+            [new SurfaceId("surface-1"), new SurfaceId("surface-2")]);
+        runtime.Desktop.DestroyedSurfaces.Should().NotContain(
+            [new SurfaceId("surface-3"), new SurfaceId("surface-4")]);
+    }
+
+    [Fact]
     public async Task ExplorerRecoveryRebuildsSurfaceAndPreservesRendererSession()
     {
         TestRuntime runtime = new(true);
@@ -582,13 +1744,24 @@ public sealed class HostCommandLoopTests
             0,
             CancellationToken.None);
 
-        await commandLoop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
-        await WaitUntilAsync(
-            () => runtime.Desktop.Replacements.Count == 2 &&
-                runtime.Desktop.AbandonedSurfaces.Contains(new SurfaceId("surface-1")),
+        HostCommandResult recoveryAccepted = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
+        DesktopRecoveryResult recoveryResult = await commandLoop.WaitForDesktopRecoveryAsync(
+            recoveryAccepted.State!.Generation,
             CancellationToken.None);
         HostStateSnapshot recovered = await GetStateAsync(commandLoop);
 
+        recoveryResult.TerminalState.Should().Be(DesktopRecoveryTerminalState.Succeeded);
+        recoveryResult.CompletionMode.Should().Be(DesktopRecoveryCompletionMode.Reattached);
+        recoveryResult.Timeline.Should().Contain(entry =>
+            entry.Phase == DesktopRecoveryPhase.SurfaceAttached);
+        recoveryResult.Timeline.Should().Contain(entry =>
+            entry.Phase == DesktopRecoveryPhase.FirstFramePresented);
+        recoveryResult.Timeline.Should().Contain(entry =>
+            entry.Phase == DesktopRecoveryPhase.SurfacesReplaced);
+        recoveryResult.Timeline.Should().Contain(entry =>
+            entry.Phase == DesktopRecoveryPhase.CleanupVerified);
         recovered.Generation.Should().Be(2);
         recovered.Sessions.Should().ContainSingle();
         recovered.Sessions[0].Session.Id.Should().Be(original.Sessions[0].Session.Id);
@@ -615,11 +1788,22 @@ public sealed class HostCommandLoopTests
             CancellationToken.None);
         renderer.FailAttachOnCount = 2;
 
-        await commandLoop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
+        HostCommandResult recoveryAccepted = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
+        DesktopRecoveryResult recoveryResult = await commandLoop.WaitForDesktopRecoveryAsync(
+            recoveryAccepted.State!.Generation,
+            CancellationToken.None);
         HostStateSnapshot rebuilt = await WaitForStateAsync(
             commandLoop,
             state => state.Generation == 3 && state.Sessions.Count == 1);
 
+        recoveryResult.TerminalState.Should().Be(DesktopRecoveryTerminalState.Succeeded);
+        recoveryResult.CompletionMode.Should().Be(DesktopRecoveryCompletionMode.Rebuilt);
+        recoveryResult.Timeline.Should().Contain(entry =>
+            entry.Phase == DesktopRecoveryPhase.RebuildScheduled);
+        recoveryResult.Timeline.Should().Contain(entry =>
+            entry.Phase == DesktopRecoveryPhase.RebuildStarted);
         renderer.IsDisposed.Should().BeTrue();
         renderer.Commands.OfType<AttachRendererSurface>().Should().HaveCount(2);
         runtime.Desktop.AbandonedSurfaces.Should().Contain(new SurfaceId("surface-1"));
@@ -668,11 +1852,24 @@ public sealed class HostCommandLoopTests
             CancellationToken.None);
         renderer.FailAfterSurfaceAttachedOnCount = 2;
 
-        await commandLoop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
+        HostCommandResult accepted = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
+        DesktopRecoveryResult recoveryResult = await commandLoop.WaitForDesktopRecoveryAsync(
+            accepted.State!.Generation,
+            CancellationToken.None);
         HostStateSnapshot rebuilt = await WaitForStateAsync(
             commandLoop,
             state => state.Generation == 3 && state.Sessions.Count == 1);
 
+        recoveryResult.TerminalState.Should().Be(DesktopRecoveryTerminalState.Succeeded);
+        recoveryResult.CompletionMode.Should().Be(DesktopRecoveryCompletionMode.Rebuilt);
+        recoveryResult.Timeline.Should().ContainSingle(entry =>
+            entry.Phase == DesktopRecoveryPhase.FirstFramePresented &&
+            entry.Outcome == ApplyStageOutcome.Rejected &&
+            entry.FailureReason == ApplyFailureReason.FirstFrameRejected);
+        recoveryResult.Timeline.Should().ContainSingle(entry =>
+            entry.Phase == DesktopRecoveryPhase.BatchAbandoned);
         renderer.IsDisposed.Should().BeTrue();
         rebuilt.Assignments.Should().ContainSingle();
         renderer.Commands.OfType<AttachRendererSurface>().Should().HaveCount(2);
@@ -691,11 +1888,24 @@ public sealed class HostCommandLoopTests
             CancellationToken.None);
         renderer.SuppressFirstFrameOnAttachCount = 2;
 
-        await commandLoop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
+        HostCommandResult accepted = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
+        DesktopRecoveryResult recoveryResult = await commandLoop.WaitForDesktopRecoveryAsync(
+            accepted.State!.Generation,
+            CancellationToken.None);
         HostStateSnapshot rebuilt = await WaitForStateAsync(
             commandLoop,
             state => state.Generation == 3 && state.Sessions.Count == 1);
 
+        recoveryResult.TerminalState.Should().Be(DesktopRecoveryTerminalState.Succeeded);
+        recoveryResult.CompletionMode.Should().Be(DesktopRecoveryCompletionMode.Rebuilt);
+        recoveryResult.Timeline.Should().ContainSingle(entry =>
+            entry.Phase == DesktopRecoveryPhase.FirstFramePresented &&
+            entry.Outcome == ApplyStageOutcome.Rejected &&
+            entry.FailureReason == ApplyFailureReason.FirstFrameTimeout);
+        recoveryResult.Timeline.Should().ContainSingle(entry =>
+            entry.Phase == DesktopRecoveryPhase.BatchAbandoned);
         renderer.IsDisposed.Should().BeTrue();
         renderer.Commands.OfType<AttachRendererSurface>().Should().HaveCount(2);
         rebuilt.Assignments.Should().ContainSingle();
@@ -739,14 +1949,47 @@ public sealed class HostCommandLoopTests
             CancellationToken.None);
         renderer.SuppressSurfaceAttachedOnCount = 2;
 
-        await commandLoop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
-        await commandLoop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
+        HostCommandResult firstSignal = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
+        HostCommandResult duplicateSignal = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
+        DesktopRecoveryResult recoveryResult = await commandLoop.WaitForDesktopRecoveryAsync(
+            firstSignal.State!.Generation,
+            CancellationToken.None);
         HostStateSnapshot rebuilt = await WaitForStateAsync(
             commandLoop,
             state => state.Generation == 3 && state.Sessions.Count == 1);
 
+        duplicateSignal.State!.Generation.Should().Be(firstSignal.State.Generation);
+        recoveryResult.TerminalState.Should().Be(DesktopRecoveryTerminalState.Succeeded);
+        recoveryResult.CompletionMode.Should().Be(DesktopRecoveryCompletionMode.Rebuilt);
         rebuilt.Generation.Should().Be(3);
         renderer.Commands.OfType<AttachRendererSurface>().Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task CompletedDesktopRecoveryJournalIsBounded()
+    {
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        await commandLoop.SendAsync(CreateApplyCommand(), CancellationToken.None);
+        await WaitForStateAsync(commandLoop, state => state.Sessions.Count == 1);
+
+        for (int index = 0; index < 34; index++)
+        {
+            HostCommandResult accepted = await commandLoop.SendAsync(
+                new ExplorerRestartedCommand(),
+                CancellationToken.None);
+            DesktopRecoveryResult result = await commandLoop.WaitForDesktopRecoveryAsync(
+                accepted.State!.Generation,
+                CancellationToken.None);
+            result.TerminalState.Should().Be(DesktopRecoveryTerminalState.Succeeded);
+        }
+
+        commandLoop.RecoveryDiagnosticsCountForTests.Should().Be(32);
     }
 
     [Fact]
@@ -785,11 +2028,30 @@ public sealed class HostCommandLoopTests
             CancellationToken.None);
         second.FailAttachOnCount = 2;
 
-        await commandLoop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
+        HostCommandResult recoveryAccepted = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
+        DesktopRecoveryResult recoveryResult = await commandLoop.WaitForDesktopRecoveryAsync(
+            recoveryAccepted.State!.Generation,
+            CancellationToken.None);
         HostStateSnapshot rebuilt = await WaitForStateAsync(
             commandLoop,
             state => state.Generation == 3 && state.Sessions.Count == 2);
 
+        recoveryResult.TerminalState.Should().Be(DesktopRecoveryTerminalState.Succeeded);
+        recoveryResult.CompletionMode.Should().Be(DesktopRecoveryCompletionMode.Rebuilt);
+        recoveryResult.Timeline.Count(entry =>
+            entry.Phase == DesktopRecoveryPhase.SurfaceCreated).Should().Be(2);
+        recoveryResult.Timeline.Should().Contain(entry =>
+            entry.Phase == DesktopRecoveryPhase.BatchAbandoned);
+        recoveryResult.Timeline.Should().ContainSingle(entry =>
+            entry.Phase == DesktopRecoveryPhase.AttachSent &&
+            entry.Outcome == ApplyStageOutcome.Rejected &&
+            entry.FailureReason == ApplyFailureReason.AttachWriteFailed &&
+            entry.SurfaceOrdinal == 2 &&
+            entry.DisplayIds.SequenceEqual(new[] { new DisplayId("secondary") }));
+        recoveryResult.Timeline.Should().ContainSingle(entry =>
+            entry.Phase == DesktopRecoveryPhase.BatchAbandoned);
         first.IsDisposed.Should().BeTrue();
         second.IsDisposed.Should().BeTrue();
         first.Commands.OfType<AttachRendererSurface>().Should().HaveCount(2);
@@ -817,7 +2079,9 @@ public sealed class HostCommandLoopTests
             CancellationToken.None);
         original.SuppressSurfaceAttachedOnCount = 2;
 
-        await commandLoop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
+        HostCommandResult recoveryAccepted = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
         FakeRendererSession finalAttempt = await runtime.Provider.WaitForSessionAsync(
             3,
             CancellationToken.None);
@@ -828,7 +2092,12 @@ public sealed class HostCommandLoopTests
         ApplyGenerationResult circuitResult = await commandLoop.WaitForApplyGenerationAsync(
             failedClosed.Generation,
             CancellationToken.None);
+        DesktopRecoveryResult recoveryResult = await commandLoop.WaitForDesktopRecoveryAsync(
+            recoveryAccepted.State!.Generation,
+            CancellationToken.None);
 
+        recoveryResult.TerminalState.Should().Be(DesktopRecoveryTerminalState.CircuitBroken);
+        recoveryResult.CompletionMode.Should().BeNull();
         failedClosed.Assignments.Should().ContainSingle();
         circuitResult.State.Should().Be(ApplyGenerationTerminalState.CircuitBroken);
         circuitResult.TerminalPhase.Should().Be(ApplyGenerationPhase.FirstFramePresented);
@@ -924,6 +2193,13 @@ public sealed class HostCommandLoopTests
 
         superseded.State.Should().Be(ApplyGenerationTerminalState.Cancelled);
         superseded.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+        FakeRendererSession abandoned = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => abandoned.IsDisposed &&
+                runtime.Desktop.DestroyedSurfaces.Contains(new SurfaceId("surface-1")),
+            CancellationToken.None);
     }
 
     [Fact]
@@ -945,6 +2221,83 @@ public sealed class HostCommandLoopTests
 
         result.State.Should().Be(ApplyGenerationTerminalState.Cancelled);
         result.FailureReason.Should().Be(ApplyFailureReason.Cancelled);
+    }
+
+    [Fact]
+    public async Task ShutdownIsIdempotentAndRejectsLaterExternalMutations()
+    {
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult accepted = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForApplyGenerationAsync(
+            accepted.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession renderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        HostCommandResult first = await commandLoop.SendAsync(
+            new ShutdownCommand(),
+            CancellationToken.None);
+        HostCommandResult second = await commandLoop.SendAsync(
+            new ShutdownCommand(),
+            CancellationToken.None);
+        HostCommandResult apply = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        HostCommandResult topology = await commandLoop.SendAsync(
+            new DisplayTopologyChangedCommand(CreateTopology() with { Revision = 2 }),
+            CancellationToken.None);
+        HostCommandResult explorer = await commandLoop.SendAsync(
+            new ExplorerRestartedCommand(),
+            CancellationToken.None);
+        await commandLoop.WaitForPendingRetirementsForDiagnosticsAsync(CancellationToken.None);
+
+        first.Accepted.Should().BeTrue();
+        second.Accepted.Should().BeTrue();
+        second.StateRevision.Should().Be(first.StateRevision);
+        apply.ErrorCode.Should().Be("host.stopping");
+        topology.ErrorCode.Should().Be("host.stopping");
+        explorer.ErrorCode.Should().Be("host.stopping");
+        renderer.Commands.OfType<ShutdownRenderer>().Should().ContainSingle();
+        renderer.ShutdownCompletedCount.Should().Be(1);
+        first.State!.ShutdownRequested.Should().BeTrue();
+        first.State.Sessions.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task FullyPreparedApplyCannotCommitAfterShutdownStarts()
+    {
+        TestRuntime runtime = new(true);
+        GatedSessionCoordinator? gated = null;
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop(inner =>
+        {
+            gated = new GatedSessionCoordinator(inner, blockedPrepareCall: 1);
+            return gated;
+        });
+        await SetTopologyAsync(commandLoop);
+        HostCommandResult accepted = await commandLoop.SendAsync(
+            CreateApplyCommand(),
+            CancellationToken.None);
+        await gated!.Prepared;
+
+        await commandLoop.SendAsync(new ShutdownCommand(), CancellationToken.None);
+        gated.Release();
+        ApplyGenerationResult terminal = await commandLoop.WaitForApplyGenerationAsync(
+            accepted.State!.Generation,
+            CancellationToken.None);
+        FakeRendererSession renderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        await WaitUntilAsync(() => renderer.IsDisposed, CancellationToken.None);
+
+        terminal.State.Should().Be(ApplyGenerationTerminalState.Cancelled);
+        terminal.FailureReason.Should().Be(ApplyFailureReason.Cancelled);
+        runtime.Desktop.Replacements.Should().BeEmpty();
+        (await GetStateAsync(commandLoop)).Sessions.Should().BeEmpty();
     }
 
     [Fact]
@@ -1004,6 +2357,86 @@ public sealed class HostCommandLoopTests
     }
 
     [Fact]
+    public async Task SystemStateRevisionSuspendsAndRejectsStaleResume()
+    {
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        await commandLoop.SendAsync(CreateApplyCommand(), CancellationToken.None);
+        await WaitForStateAsync(commandLoop, state => state.Sessions.Count == 1);
+        FakeRendererSession renderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+        SystemStateSnapshot locked = new(false, true, false, false, false, false);
+        SystemStateSnapshot unlocked = locked with { IsSessionLocked = false };
+
+        await commandLoop.SendAsync(
+            new SystemStateChangedCommand(new SystemStateChange(
+                2,
+                locked,
+                SystemStateChangeReason.SessionLocked)),
+            CancellationToken.None);
+        await WaitForStateAsync(
+            commandLoop,
+            state => state.Sessions[0].Session.State == PlaybackState.Suspended);
+
+        await commandLoop.SendAsync(
+            new SystemStateChangedCommand(new SystemStateChange(
+                1,
+                unlocked,
+                SystemStateChangeReason.SessionUnlocked)),
+            CancellationToken.None);
+        HostStateSnapshot stale = await GetStateAsync(commandLoop);
+        stale.SystemStateRevision.Should().Be(2);
+        stale.SystemState.IsSessionLocked.Should().BeTrue();
+        stale.Sessions[0].Session.State.Should().Be(PlaybackState.Suspended);
+
+        await commandLoop.SendAsync(
+            new SystemStateChangedCommand(new SystemStateChange(
+                3,
+                unlocked,
+                SystemStateChangeReason.SessionUnlocked)),
+            CancellationToken.None);
+        await WaitForStateAsync(
+            commandLoop,
+            state => state.Sessions[0].Session.State == PlaybackState.Playing);
+        renderer.Commands.Any(command =>
+            command is ChangeRendererState { TargetState: PlaybackState.Suspended })
+            .Should().BeTrue();
+        renderer.Commands.Any(command =>
+            command is ChangeRendererState { TargetState: PlaybackState.Playing })
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ApplyCommittedWhileLockedStartsInSuspendedPolicyState()
+    {
+        TestRuntime runtime = new(true);
+        await using HostCommandLoop commandLoop = runtime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        await commandLoop.SendAsync(
+            new SystemStateChangedCommand(new SystemStateChange(
+                1,
+                new SystemStateSnapshot(false, true, false, false, false, false),
+                SystemStateChangeReason.SessionLocked)),
+            CancellationToken.None);
+
+        await commandLoop.SendAsync(CreateApplyCommand(), CancellationToken.None);
+        HostStateSnapshot committed = await WaitForStateAsync(
+            commandLoop,
+            state => state.Sessions.Count == 1 &&
+                state.Sessions[0].Session.State == PlaybackState.Suspended);
+        FakeRendererSession renderer = await runtime.Provider.WaitForSessionAsync(
+            0,
+            CancellationToken.None);
+
+        committed.SystemState.IsSessionLocked.Should().BeTrue();
+        renderer.Commands.Any(command =>
+            command is ChangeRendererState { TargetState: PlaybackState.Suspended })
+            .Should().BeTrue();
+    }
+
+    [Fact]
     public async Task RendererExitFaultsOnlyMatchingGeneration()
     {
         TestRuntime runtime = new(true);
@@ -1053,13 +2486,217 @@ public sealed class HostCommandLoopTests
 
         result.ConnectedAssignments.Should().ContainSingle().Which.Should().Be(connected);
         result.RestoreResult!.Accepted.Should().BeTrue();
+        result.RestoreGenerationResult!.State.Should()
+            .Be(ApplyGenerationTerminalState.Succeeded);
         state.Generation.Should().Be(1);
         state.PlaybackPolicy.Should().Be(policy);
-        state.Assignments.Should().ContainSingle().Which.Should().Be(connected);
+        state.Assignments.Should().BeEquivalentTo([connected, disconnected]);
 
         await bootstrapper.PersistAsync(state, CancellationToken.None);
         store.SavedPolicy.Should().Be(policy);
-        store.SavedAssignments.Should().BeEquivalentTo([connected]);
+        store.SavedAssignments.Should().BeEquivalentTo([connected, disconnected]);
+    }
+
+    [Fact]
+    public async Task WindowsHostRuntimeStartsValidatesStopsAndPersistsExactlyOnce()
+    {
+        TestRuntime testRuntime = new(true);
+        HostCommandLoop commandLoop = testRuntime.CreateCommandLoop();
+        FakeHostConfigurationStore store = new(
+            new HostConfiguration(UserPlaybackPolicy.Default, []));
+        FakeDisplayTopologySource topologySource = new(CreateTopology());
+        FakeWindowsEnvironmentEventBridge eventBridge = new();
+        int platformDisposeCount = 0;
+        WindowsHostRuntime runtime = new(
+            commandLoop,
+            new HostBootstrapper(store),
+            topologySource,
+            eventBridge,
+            () =>
+            {
+                platformDisposeCount++;
+                return ValueTask.CompletedTask;
+            });
+
+        await runtime.StartAsync(CancellationToken.None);
+        Task firstStop = runtime.StopAsync(CancellationToken.None);
+        Task secondStop = runtime.StopAsync(CancellationToken.None);
+        await Task.WhenAll(firstStop, secondStop);
+
+        runtime.State.Should().Be(WindowsHostRuntimeState.Stopped);
+        runtime.LastFault.Should().BeNull();
+        eventBridge.StartCount.Should().Be(1);
+        eventBridge.ValidationCount.Should().Be(1);
+        eventBridge.DisposeCount.Should().Be(1);
+        platformDisposeCount.Should().Be(1);
+        store.SavedPolicy.Should().Be(UserPlaybackPolicy.Default);
+        store.SavedAssignments.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task WindowsEventBridgeValidatesTaskbarSignalsBeforeStartingOneRecovery()
+    {
+        TestRuntime testRuntime = new(true);
+        await using HostCommandLoop commandLoop = testRuntime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        await using WindowsDesktopHost desktopHost = new(
+            new WindowsShellSnapshot("test", "26200", true, 1));
+        using WindowsDisplayTopologySource displaySource = new();
+        FakeExplorerChangeMonitor monitor = new();
+        WindowsSystemStateSource systemStateSource = new(
+            new SystemStateSnapshot(false, false, false, false, false, false));
+        await using WindowsDesktopEventBridge bridge = new(
+            desktopHost,
+            displaySource,
+            commandLoop,
+            monitor,
+            systemStateSource);
+        bridge.Start();
+
+        for (int index = 0; index < 10; index++)
+        {
+            bridge.ProcessWindowSignalForTests(
+                new DesktopWindowSignal(DesktopWindowSignalKind.TaskbarCreated));
+        }
+
+        monitor.RequestCount.Should().Be(10);
+        bridge.RawTaskbarSignalCount.Should().Be(10);
+        bridge.ValidatedShellChangeCount.Should().Be(0);
+        bridge.ForwardedRecoveryCount.Should().Be(0);
+        commandLoop.RecoveryDiagnosticsCountForTests.Should().Be(0);
+
+        monitor.RaiseValidationFailure(new IOException("Simulated Shell probe failure."));
+        bridge.LastExplorerValidationFailure.Should().NotBeNull();
+        commandLoop.RecoveryDiagnosticsCountForTests.Should().Be(0);
+
+        monitor.RaiseRestarted();
+        await WaitUntilAsync(
+            () => commandLoop.RecoveryDiagnosticsCountForTests == 1,
+            CancellationToken.None);
+
+        bridge.ValidatedShellChangeCount.Should().Be(1);
+        bridge.ForwardedRecoveryCount.Should().Be(1);
+        commandLoop.RecoveryDiagnosticsCountForTests.Should().Be(1);
+
+        await commandLoop.SendAsync(new ShutdownCommand(), CancellationToken.None);
+        monitor.RaiseRestarted();
+
+        bridge.LastExplorerForwardingFailure!.Kind.Should()
+            .Be(ExplorerEventForwardingFailureKind.HostStopping);
+        bridge.ForwardedRecoveryCount.Should().Be(1);
+        commandLoop.RecoveryDiagnosticsCountForTests.Should().Be(1);
+
+        bridge.ProcessWindowSignalForTests(
+            new DesktopWindowSignal(DesktopWindowSignalKind.SessionLocked));
+        bridge.LastSystemStateForwardingFailure!.Kind.Should()
+            .Be(SystemStateForwardingFailureKind.HostStopping);
+
+        await bridge.DisposeAsync();
+        monitor.RaiseRestarted();
+        bridge.ValidatedShellChangeCount.Should().Be(2);
+        bridge.ForwardedRecoveryCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task WindowsEventBridgeKeepsRendererSuspendedUntilUnlockValidationCompletes()
+    {
+        TestRuntime testRuntime = new(true);
+        await using HostCommandLoop commandLoop = testRuntime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        await using WindowsDesktopHost desktopHost = new(
+            new WindowsShellSnapshot("test", "26200", true, 1));
+        using WindowsDisplayTopologySource displaySource = new();
+        FakeExplorerChangeMonitor monitor = new();
+        WindowsSystemStateSource systemStateSource = new(
+            new SystemStateSnapshot(false, false, false, false, false, false));
+        await using WindowsDesktopEventBridge bridge = new(
+            desktopHost,
+            displaySource,
+            commandLoop,
+            monitor,
+            systemStateSource);
+        bridge.Start();
+        await commandLoop.SendAsync(CreateApplyCommand(), CancellationToken.None);
+        await WaitForStateAsync(commandLoop, state => state.Sessions.Count == 1);
+
+        bridge.ProcessWindowSignalForTests(
+            new DesktopWindowSignal(DesktopWindowSignalKind.SessionLocked));
+        await WaitForStateAsync(
+            commandLoop,
+            state => state.Sessions[0].Session.State == PlaybackState.Suspended);
+
+        bridge.ProcessWindowSignalForTests(
+            new DesktopWindowSignal(DesktopWindowSignalKind.SessionUnlocked));
+        await Task.Delay(50);
+        HostStateSnapshot pending = await GetStateAsync(commandLoop);
+        pending.SystemState.IsSessionLocked.Should().BeTrue();
+        pending.Sessions[0].Session.State.Should().Be(PlaybackState.Suspended);
+        monitor.RequestCount.Should().Be(1);
+
+        monitor.RaiseValidationCompleted(shellAvailable: false);
+        await Task.Delay(50);
+        (await GetStateAsync(commandLoop)).Sessions[0].Session.State
+            .Should().Be(PlaybackState.Suspended);
+
+        monitor.RaiseValidationCompleted(shellAvailable: true);
+        HostStateSnapshot resumed = await WaitForStateAsync(
+            commandLoop,
+            state => state.Sessions[0].Session.State == PlaybackState.Playing);
+        resumed.SystemState.IsSessionLocked.Should().BeFalse();
+        bridge.ForwardedSystemStateCount.Should().Be(4);
+    }
+
+    [Theory]
+    [InlineData(
+        DesktopWindowSignalKind.DisplayPoweredOff,
+        DesktopWindowSignalKind.DisplayPoweredOn,
+        SystemStateChangeReason.DisplayOn)]
+    [InlineData(
+        DesktopWindowSignalKind.SystemSuspending,
+        DesktopWindowSignalKind.SystemResuming,
+        SystemStateChangeReason.SystemResumed)]
+    public async Task WindowsEventBridgeValidatesEnvironmentBeforeAutomaticResume(
+        DesktopWindowSignalKind suspendSignal,
+        DesktopWindowSignalKind resumeSignal,
+        SystemStateChangeReason completedReason)
+    {
+        TestRuntime testRuntime = new(true);
+        await using HostCommandLoop commandLoop = testRuntime.CreateCommandLoop();
+        await SetTopologyAsync(commandLoop);
+        await using WindowsDesktopHost desktopHost = new(
+            new WindowsShellSnapshot("test", "26200", true, 1));
+        using WindowsDisplayTopologySource displaySource = new();
+        FakeExplorerChangeMonitor monitor = new();
+        WindowsSystemStateSource systemStateSource = new(
+            new SystemStateSnapshot(false, false, false, false, false, false));
+        await using WindowsDesktopEventBridge bridge = new(
+            desktopHost,
+            displaySource,
+            commandLoop,
+            monitor,
+            systemStateSource);
+        bridge.Start();
+        await commandLoop.SendAsync(CreateApplyCommand(), CancellationToken.None);
+        await WaitForStateAsync(commandLoop, state => state.Sessions.Count == 1);
+
+        bridge.ProcessWindowSignalForTests(new DesktopWindowSignal(suspendSignal));
+        await WaitForStateAsync(
+            commandLoop,
+            state => state.Sessions[0].Session.State == PlaybackState.Suspended);
+        bridge.ProcessWindowSignalForTests(new DesktopWindowSignal(resumeSignal));
+        await Task.Delay(50);
+        (await GetStateAsync(commandLoop)).Sessions[0].Session.State
+            .Should().Be(PlaybackState.Suspended);
+
+        monitor.RaiseValidationCompleted(shellAvailable: true);
+        HostStateSnapshot resumed = await WaitForStateAsync(
+            commandLoop,
+            state => state.Sessions[0].Session.State == PlaybackState.Playing);
+
+        resumed.SystemStateReason.Should().Be(completedReason);
+        monitor.RequestCount.Should().Be(1);
+        bridge.GetSystemStateHistoryForDiagnostics().Should().Contain(change =>
+            change.Reason == completedReason);
     }
 
     private static ApplyWallpaperCommand CreateApplyCommand() =>
@@ -1228,7 +2865,8 @@ public sealed class HostCommandLoopTests
 
         public SessionCoordinator Coordinator { get; private set; } = null!;
 
-        public HostCommandLoop CreateCommandLoop()
+        public HostCommandLoop CreateCommandLoop(
+            Func<ISessionCoordinator, ISessionCoordinator>? decorateCoordinator = null)
         {
             Coordinator = new SessionCoordinator(
                 new FakeWallpaperRepository(),
@@ -1239,8 +2877,114 @@ public sealed class HostCommandLoopTests
                 rendererStageTimeout,
                 applyDeadlineBudget,
                 retirementPolicy);
-            return new HostCommandLoop(Coordinator, new DefaultPlaybackPolicyEvaluator());
+            ISessionCoordinator selected = decorateCoordinator?.Invoke(Coordinator) ?? Coordinator;
+            return new HostCommandLoop(selected, new DefaultPlaybackPolicyEvaluator());
         }
+    }
+
+    private sealed class GatedSessionCoordinator : ISessionCoordinator
+    {
+        private readonly ISessionCoordinator inner;
+        private readonly int blockedPrepareCall;
+        private readonly TaskCompletionSource prepared =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int prepareCalls;
+
+        public GatedSessionCoordinator(ISessionCoordinator inner, int blockedPrepareCall)
+        {
+            this.inner = inner;
+            this.blockedPrepareCall = blockedPrepareCall;
+        }
+
+        public Task Prepared => prepared.Task;
+
+        public void Release() => release.TrySetResult();
+
+        public async Task<PreparedApply> PrepareApplyAsync(
+            IReadOnlyList<WallpaperAssignment> assignments,
+            DisplayTopology topology,
+            long generation,
+            ApplyGenerationOperation operation,
+            CancellationToken cancellationToken)
+        {
+            int call = Interlocked.Increment(ref prepareCalls);
+            PreparedApply result = await inner.PrepareApplyAsync(
+                    assignments,
+                    topology,
+                    generation,
+                    operation,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (call == blockedPrepareCall)
+            {
+                prepared.TrySetResult();
+                // Deliberately hold a fully prepared result after FirstFrame so the Host can
+                // accept a newer topology before the old internal completion is posted.
+                await release.Task.ConfigureAwait(false);
+            }
+            return result;
+        }
+
+        public int GetPlannedSurfaceCount(
+            IReadOnlyList<WallpaperAssignment> assignments,
+            DisplayTopology topology) => inner.GetPlannedSurfaceCount(assignments, topology);
+
+        public TimeSpan GetApplyDeadline(int surfaceCount) =>
+            inner.GetApplyDeadline(surfaceCount);
+
+        public Task<IReadOnlyList<ActiveSurfaceResizeResult>> ResizeActiveSurfacesAsync(
+            IReadOnlyList<ActiveSurfaceResizeRequest> requests,
+            DisplayTopology topology,
+            long generation,
+            CancellationToken cancellationToken) => inner.ResizeActiveSurfacesAsync(
+                requests,
+                topology,
+                generation,
+                cancellationToken);
+
+        public Task<SessionRetirementBatchResult> RetireAsync(
+            IReadOnlyList<PreparedSession> sessions,
+            CancellationToken cancellationToken) => inner.RetireAsync(sessions, cancellationToken);
+
+        public Task ReplaceSurfacesAsync(
+            PreparedApply preparedApply,
+            IReadOnlyList<PreparedSession> replacedSessions,
+            CancellationToken cancellationToken) =>
+            inner.ReplaceSurfacesAsync(preparedApply, replacedSessions, cancellationToken);
+
+        public Task<PreparedRecovery> PrepareRecoveryAsync(
+            IReadOnlyList<PreparedSession> activeSessions,
+            DisplayTopology topology,
+            long hostGeneration,
+            Action<DesktopRecoveryMilestone>? observer,
+            CancellationToken cancellationToken) => inner.PrepareRecoveryAsync(
+                activeSessions,
+                topology,
+                hostGeneration,
+                observer,
+                cancellationToken);
+
+        public Task ReplaceRecoveredSurfacesAsync(
+            PreparedRecovery recovery,
+            CancellationToken cancellationToken) =>
+            inner.ReplaceRecoveredSurfacesAsync(recovery, cancellationToken);
+
+        public Task DestroySurfacesAsync(
+            IEnumerable<PreparedSurface> surfaces,
+            CancellationToken cancellationToken) =>
+            inner.DestroySurfacesAsync(surfaces, cancellationToken);
+
+        public Task AbandonSurfacesAsync(
+            IEnumerable<PreparedSurface> surfaces,
+            CancellationToken cancellationToken) =>
+            inner.AbandonSurfacesAsync(surfaces, cancellationToken);
+
+        public Task AbandonRecoveryAsync(
+            PreparedRecovery recovery,
+            CancellationToken cancellationToken) =>
+            inner.AbandonRecoveryAsync(recovery, cancellationToken);
     }
 
     private sealed class FakeWallpaperRepository : IWallpaperRepository
@@ -1312,6 +3056,81 @@ public sealed class HostCommandLoopTests
         {
             SavedAssignments = assignments.ToArray();
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeDisplayTopologySource(DisplayTopology current)
+        : IDisplayTopologySource
+    {
+        public DisplayTopology Current { get; } = current;
+
+        public event EventHandler<DisplayTopologyChangedEventArgs>? Changed
+        {
+            add { }
+            remove { }
+        }
+    }
+
+    private sealed class FakeWindowsEnvironmentEventBridge
+        : IWindowsEnvironmentEventBridge
+    {
+        public int StartCount { get; private set; }
+
+        public int ValidationCount { get; private set; }
+
+        public int DisposeCount { get; private set; }
+
+        public void Start() => StartCount++;
+
+        public void RequestEnvironmentValidation() => ValidationCount++;
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FakeExplorerChangeMonitor : IExplorerChangeMonitor
+    {
+        public int RequestCount { get; private set; }
+
+        public event EventHandler<ExplorerRestartedEventArgs>? Restarted;
+
+        public event EventHandler<ExplorerValidationFailedEventArgs>? ValidationFailed;
+
+        public event EventHandler<ExplorerValidationCompletedEventArgs>? ValidationCompleted;
+
+        public void Start()
+        {
+        }
+
+        public void Stop()
+        {
+        }
+
+        public void RequestValidation() => RequestCount++;
+
+        public void RaiseRestarted() => Restarted?.Invoke(
+            this,
+            new ExplorerRestartedEventArgs(
+                ExplorerChangeReason.ProgmanRecreated,
+                10,
+                11));
+
+        public void RaiseValidationFailure(Exception exception) =>
+            ValidationFailed?.Invoke(this, new ExplorerValidationFailedEventArgs(exception));
+
+        public void RaiseValidationCompleted(bool shellAvailable = true, bool shellChanged = false) =>
+            ValidationCompleted?.Invoke(
+                this,
+                new ExplorerValidationCompletedEventArgs(
+                    shellAvailable,
+                    shellChanged,
+                    shellAvailable ? 11UL : 0UL));
+
+        public void Dispose()
+        {
         }
     }
 
@@ -1395,6 +3214,8 @@ public sealed class HostCommandLoopTests
 
         public bool SuppressShutdownCompleted { get; set; }
 
+        public bool FailShutdownSend { get; set; }
+
         public int ShutdownCompletedCount { get; private set; }
 
         public IAsyncEnumerable<RendererEvent> ReadEventsAsync(CancellationToken cancellationToken) =>
@@ -1435,6 +3256,11 @@ public sealed class HostCommandLoopTests
                 }
             }
 
+            if (command is SetRendererBounds)
+            {
+                events.Writer.TryWrite(new RendererFirstFramePresented(currentGeneration));
+            }
+
             if (autoPresentFirstFrame && command is LoadRendererContent)
             {
                 events.Writer.TryWrite(new RendererContentLoaded(currentGeneration));
@@ -1447,6 +3273,10 @@ public sealed class HostCommandLoopTests
 
             if (command is ShutdownRenderer shutdown)
             {
+                if (FailShutdownSend)
+                {
+                    throw new IOException("Simulated Shutdown transport failure.");
+                }
                 currentGeneration = shutdown.Generation;
                 if (!SuppressShutdownCompleted)
                 {
@@ -1458,8 +3288,10 @@ public sealed class HostCommandLoopTests
             return Task.CompletedTask;
         }
 
-        public void PresentFirstFrame() =>
+        public void PresentFirstFrame()
+        {
             events.Writer.TryWrite(new RendererFirstFramePresented(currentGeneration));
+        }
 
         public void FailBeforeFirstFrame() =>
             events.Writer.TryWrite(new RendererFailed(
@@ -1486,12 +3318,30 @@ public sealed class HostCommandLoopTests
 
         public ConcurrentQueue<SurfaceReplacement> Replacements { get; } = new();
 
+        public ConcurrentQueue<(SurfaceId SurfaceId, SurfaceRequest Request)> ResizedSurfaces
+        { get; } = new();
+
         public bool FailNextReplacement { get; set; }
+
+        public int TransientTopologyFailuresRemaining { get; set; }
+
+        public int TransientReplacementFailuresRemaining { get; set; }
+
+        public int EnsureTopologyCallCount { get; private set; }
 
         public Task<DesktopTopology> EnsureTopologyAsync(
             DisplayTopology displays,
-            CancellationToken cancellationToken) =>
-            Task.FromResult(new DesktopTopology(displays.Revision, []));
+            CancellationToken cancellationToken)
+        {
+            EnsureTopologyCallCount++;
+            if (TransientTopologyFailuresRemaining > 0)
+            {
+                TransientTopologyFailuresRemaining--;
+                throw new InvalidOperationException(
+                    "UnexpectedTopologyMutation: simulated transient Shell mutation.");
+            }
+            return Task.FromResult(new DesktopTopology(displays.Revision, []));
+        }
 
         public Task<DesktopSurface> CreateSurfaceAsync(
             SurfaceRequest request,
@@ -1510,12 +3360,28 @@ public sealed class HostCommandLoopTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Replacements.Enqueue(replacement);
+            if (TransientReplacementFailuresRemaining > 0)
+            {
+                TransientReplacementFailuresRemaining--;
+                throw new InvalidOperationException(
+                    "UnexpectedTopologyMutation: simulated parent coordinate-space change.");
+            }
             if (FailNextReplacement)
             {
                 FailNextReplacement = false;
                 throw new InvalidOperationException("Simulated Surface replacement failure.");
             }
 
+            return Task.CompletedTask;
+        }
+
+        public Task ResizeSurfaceAsync(
+            SurfaceId surfaceId,
+            SurfaceRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ResizedSurfaces.Enqueue((surfaceId, request));
             return Task.CompletedTask;
         }
 

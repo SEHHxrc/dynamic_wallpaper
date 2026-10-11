@@ -14,6 +14,11 @@ public interface IDesktopHost
         SurfaceRequest request,
         CancellationToken cancellationToken);
 
+    Task ResizeSurfaceAsync(
+        SurfaceId surfaceId,
+        SurfaceRequest request,
+        CancellationToken cancellationToken);
+
     Task ReplaceSurfacesAsync(
         SurfaceReplacement replacement,
         CancellationToken cancellationToken);

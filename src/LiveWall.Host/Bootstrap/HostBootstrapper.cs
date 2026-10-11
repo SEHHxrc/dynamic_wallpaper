@@ -2,6 +2,7 @@ using LiveWall.Application.Configuration;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
 using LiveWall.Host.CommandLoop;
+using LiveWall.Host.Orchestration;
 
 namespace LiveWall.Host.Bootstrap;
 
@@ -40,15 +41,29 @@ internal sealed class HostBootstrapper
             .ToArray();
 
         HostCommandResult? restoreResult = null;
-        if (connectedAssignments.Length > 0)
+        ApplyGenerationResult? restoreGenerationResult = null;
+        if (loaded.Configuration.Assignments.Count > 0)
         {
             restoreResult = await commandLoop.SendAsync(
-                    new RestoreAssignmentsCommand(connectedAssignments),
+                    new RestoreAssignmentsCommand(loaded.Configuration.Assignments),
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (connectedAssignments.Length > 0 &&
+                restoreResult.Accepted &&
+                restoreResult.State is { } restoreState)
+            {
+                restoreGenerationResult = await commandLoop.WaitForApplyGenerationAsync(
+                        restoreState.Generation,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
 
-        return new HostBootstrapResult(loaded, connectedAssignments, restoreResult);
+        return new HostBootstrapResult(
+            loaded,
+            connectedAssignments,
+            restoreResult,
+            restoreGenerationResult);
     }
 
     public async Task PersistAsync(
@@ -66,4 +81,5 @@ internal sealed class HostBootstrapper
 internal sealed record HostBootstrapResult(
     HostConfigurationLoadResult Configuration,
     IReadOnlyList<WallpaperAssignment> ConnectedAssignments,
-    HostCommandResult? RestoreResult);
+    HostCommandResult? RestoreResult,
+    ApplyGenerationResult? RestoreGenerationResult);

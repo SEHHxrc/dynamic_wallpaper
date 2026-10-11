@@ -22,6 +22,12 @@ internal interface IDesktopSurfaceFactory : IAsyncDisposable
         IReadOnlyList<ulong> replacedSurfaceHandles,
         CancellationToken cancellationToken);
 
+    Task ResizeAsync(
+        ulong surfaceHandle,
+        SurfaceRequest request,
+        DesktopAttachmentLease attachmentLease,
+        CancellationToken cancellationToken);
+
     Task DestroyAsync(ulong surfaceHandle, CancellationToken cancellationToken);
 
     Task AbandonAsync(ulong surfaceHandle, CancellationToken cancellationToken);
@@ -34,6 +40,7 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
     private readonly IDesktopWindowDispatcher dispatcher;
     private readonly bool ownsDispatcher;
     private readonly Func<DesktopAttachmentLease, bool> shellGenerationValidator;
+    private readonly Func<nint, NativeRect> parentBoundsProvider;
     private readonly Dictionary<nint, TrackedDesktopSurfaceWindow> surfaces = [];
     private nint instance;
     private bool registered;
@@ -47,18 +54,49 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
     internal NativeDesktopSurfaceFactory(
         IDesktopWindowDispatcher dispatcher,
         bool ownsDispatcher = false,
-        Func<DesktopAttachmentLease, bool>? shellGenerationValidator = null)
+        Func<DesktopAttachmentLease, bool>? shellGenerationValidator = null,
+        Func<nint, NativeRect>? parentBoundsProvider = null)
     {
         this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         this.ownsDispatcher = ownsDispatcher;
         this.shellGenerationValidator = shellGenerationValidator ??
             (static attachmentLease => attachmentLease.HasCurrentShellGeneration());
+        this.parentBoundsProvider = parentBoundsProvider ?? GetParentBounds;
         windowProcedure = WindowProcedure;
     }
 
     public IAsyncEnumerable<DesktopWindowSignal> ReadSignalsAsync(
         CancellationToken cancellationToken) =>
         dispatcher.ReadSignalsAsync(cancellationToken);
+
+    internal async Task PostTaskbarCreatedForDiagnosticsAsync(
+        int signalCount,
+        CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(signalCount, 1);
+        if (dispatcher is not DesktopWindowDispatcher nativeDispatcher)
+        {
+            throw new InvalidOperationException(
+                "TaskbarCreated injection requires the native Desktop Window Dispatcher.");
+        }
+
+        await nativeDispatcher.Ready.WaitAsync(cancellationToken).ConfigureAwait(false);
+        nint signalWindow = unchecked((nint)(long)nativeDispatcher.SignalWindowHandle);
+        for (int index = 0; index < signalCount; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!DesktopNativeMethods.PostMessage(
+                    signalWindow,
+                    nativeDispatcher.TaskbarCreatedMessage,
+                    0,
+                    0))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not post TaskbarCreated to the LiveWall signal window.");
+            }
+        }
+    }
 
     public Task<ulong> CreateAsync(
         SurfaceId id,
@@ -85,6 +123,23 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         ulong[] replaced = replacedSurfaceHandles.ToArray();
         return dispatcher.InvokeAsync(
             () => ReplaceOnDispatcher(provisional, replaced),
+            cancellationToken);
+    }
+
+    public Task ResizeAsync(
+        ulong surfaceHandle,
+        SurfaceRequest request,
+        DesktopAttachmentLease attachmentLease,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(attachmentLease);
+        ThrowIfDisposed();
+        return dispatcher.InvokeAsync(
+            () => ResizeOnDispatcher(
+                ToNativeHandle(surfaceHandle),
+                request,
+                attachmentLease),
             cancellationToken);
     }
 
@@ -159,7 +214,8 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         EnsureWindowClassRegistered();
         ValidateAttachmentLease(attachmentLease);
         nint parent = ToNativeHandle(attachmentLease.ParentWindowHandle);
-        NativeRect parentBounds = GetParentBounds(parent);
+        NativeRect parentBounds = parentBoundsProvider(parent);
+        ValidateAttachmentBounds(attachmentLease, parentBounds);
         uint style = DesktopNativeMethods.WindowStyleChild |
             DesktopNativeMethods.WindowStyleClipChildren |
             DesktopNativeMethods.WindowStyleClipSiblings |
@@ -191,6 +247,7 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         try
         {
             PositionHidden(window, request.Bounds, parentBounds, attachmentLease);
+            RaisedDesktopOwnedWindowRegistry.Register(window);
             surfaces.Add(
                 window,
                 new TrackedDesktopSurfaceWindow(
@@ -201,6 +258,7 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         }
         catch
         {
+            RaisedDesktopOwnedWindowRegistry.Unregister(window);
             _ = DesktopNativeMethods.DestroyWindow(window);
             throw;
         }
@@ -248,7 +306,11 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
             .ToArray();
         foreach (TrackedDesktopSurfaceWindow window in replacedInCurrentGeneration)
         {
-            ValidateCurrentSurfaceWindow(window, "active");
+            // A display reconfiguration intentionally makes the previous active Surface's
+            // captured coordinate space stale. It is still safe to hide that HWND when its
+            // Shell generation and anchors remain current; only the provisional Surface that
+            // will become visible must match the current parent bounds.
+            ValidateCurrentSurfaceWindow(window, "active", validateAttachmentBounds: false);
         }
 
         nint deferred = DesktopNativeMethods.BeginDeferWindowPos(
@@ -340,7 +402,8 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
 
     private void ValidateCurrentSurfaceWindow(
         TrackedDesktopSurfaceWindow tracked,
-        string role)
+        string role,
+        bool validateAttachmentBounds = true)
     {
         if (!DesktopNativeMethods.IsWindow(tracked.Window))
         {
@@ -349,6 +412,12 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         }
 
         ValidateAttachmentLease(tracked.AttachmentLease);
+        if (validateAttachmentBounds)
+        {
+            ValidateAttachmentBounds(
+                tracked.AttachmentLease,
+                parentBoundsProvider(ToNativeHandle(tracked.AttachmentLease.ParentWindowHandle)));
+        }
     }
 
     private static nint DeferVisibility(
@@ -449,6 +518,7 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
             throw new Win32Exception(Marshal.GetLastWin32Error(), "DestroyWindow failed.");
         }
 
+        RaisedDesktopOwnedWindowRegistry.Unregister(surface);
         surfaces.Remove(surface);
     }
 
@@ -468,6 +538,7 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
 
         // A stale HWND may already have been destroyed and reused by another owner. Removing
         // bookkeeping is the only valid operation once the leased Shell generation changed.
+        RaisedDesktopOwnedWindowRegistry.Unregister(surface);
         surfaces.Remove(surface);
     }
 
@@ -542,6 +613,74 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
         }
 
         return bounds;
+    }
+
+    private void ResizeOnDispatcher(
+        nint surface,
+        SurfaceRequest request,
+        DesktopAttachmentLease attachmentLease)
+    {
+        ThrowIfDisposed();
+        if (!surfaces.TryGetValue(surface, out TrackedDesktopSurfaceWindow? tracked) ||
+            tracked.State != DesktopSurfaceWindowState.Active)
+        {
+            throw new InvalidOperationException(
+                "Only an active Surface owned by this factory can be resized.");
+        }
+
+        ValidateCurrentSurfaceWindow(tracked, "active", validateAttachmentBounds: false);
+        ValidateAttachmentLease(attachmentLease);
+        nint parent = ToNativeHandle(attachmentLease.ParentWindowHandle);
+        NativeRect parentBounds = parentBoundsProvider(parent);
+        // Active transition continuity intentionally uses the live parent coordinate space.
+        // The generation, parent process and Raised anchor/backdrop relationship are still
+        // validated above. A later provisional create/replace performs the authoritative
+        // attachment-bounds and structural-fingerprint validation after Shell stabilization.
+        if (ToNativeHandle(tracked.AttachmentLease.ParentWindowHandle) != parent)
+        {
+            throw new InvalidOperationException(
+                "An active Surface cannot be resized across different Shell parent windows.");
+        }
+
+        if (!DesktopNativeMethods.SetWindowPos(
+                surface,
+                0,
+                checked(request.Bounds.X - parentBounds.Left),
+                checked(request.Bounds.Y - parentBounds.Top),
+                request.Bounds.Width,
+                request.Bounds.Height,
+                DesktopNativeMethods.SetWindowPositionNoActivate |
+                    DesktopNativeMethods.SetWindowPositionNoZOrder))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Active Surface resize failed.");
+        }
+
+        surfaces[surface] = tracked with { AttachmentLease = attachmentLease };
+    }
+
+    private static void ValidateAttachmentBounds(
+        DesktopAttachmentLease attachmentLease,
+        NativeRect currentBounds)
+    {
+        if (attachmentLease.AttachmentBounds is not ShellWindowBounds expected)
+        {
+            return;
+        }
+
+        if (currentBounds.Left != expected.X ||
+            currentBounds.Top != expected.Y ||
+            currentBounds.Right - currentBounds.Left != expected.Width ||
+            currentBounds.Bottom - currentBounds.Top != expected.Height)
+        {
+            throw new DesktopAttachPointUnavailableException(
+                "UnexpectedTopologyMutation: the desktop attachment parent bounds changed " +
+                "after the generation-scoped lease was discovered. " +
+                $"Expected=({expected.X},{expected.Y} " +
+                $"{expected.Width}x{expected.Height}); " +
+                $"Actual=({currentBounds.Left},{currentBounds.Top} " +
+                $"{currentBounds.Right - currentBounds.Left}x" +
+                $"{currentBounds.Bottom - currentBounds.Top}).");
+        }
     }
 
     private static void PositionHidden(
@@ -624,6 +763,7 @@ internal sealed class NativeDesktopSurfaceFactory : IDesktopSurfaceFactory
                 current,
                 DesktopNativeMethods.WindowLongStyle).ToInt64());
             if (!surfaces.ContainsKey(current) &&
+                !RaisedDesktopDiagnosticWindowRegistry.Contains(current) &&
                 (style & DesktopNativeMethods.WindowStyleVisible) != 0)
             {
                 throw new DesktopAttachPointUnavailableException(

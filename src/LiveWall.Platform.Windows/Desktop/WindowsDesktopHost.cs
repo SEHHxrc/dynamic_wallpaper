@@ -15,6 +15,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
     private SelectedDesktopAdapter? selectedAdapter;
     private DesktopTopology topology = new(0, []);
     private long displayTopologyRevision = -1;
+    private long replacementCount;
     private bool disposed;
 
     public WindowsDesktopHost(WindowsShellSnapshot shellSnapshot)
@@ -66,6 +67,51 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
         CancellationToken cancellationToken) =>
         surfaceFactory.ReadSignalsAsync(cancellationToken);
 
+    internal Task PostTaskbarCreatedForDiagnosticsAsync(
+        int signalCount,
+        CancellationToken cancellationToken) =>
+        surfaceFactory is NativeDesktopSurfaceFactory nativeFactory
+            ? nativeFactory.PostTaskbarCreatedForDiagnosticsAsync(
+                signalCount,
+                cancellationToken)
+            : throw new InvalidOperationException(
+                "TaskbarCreated injection requires the native Desktop Surface Factory.");
+
+    internal long ReplacementCountForDiagnostics => Interlocked.Read(ref replacementCount);
+
+    internal int OwnedSurfaceCountForDiagnostics
+    {
+        get
+        {
+            lock (stateGate)
+            {
+                return surfaces.Count;
+            }
+        }
+    }
+
+    internal DesktopTransitionGuardArmContext GetTransitionGuardArmContext(DisplayId displayId)
+    {
+        lock (stateGate)
+        {
+            SelectedDesktopAdapter selected = selectedAdapter ??
+                throw new InvalidOperationException("Desktop topology has not been initialized.");
+            TrackedSurface[] matches = surfaces.Values
+                .Where(item =>
+                    item.State == DesktopSurfaceState.Active &&
+                    item.Request.DisplayIds.Contains(displayId))
+                .ToArray();
+            if (matches.Length != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Transition guard target '{displayId}' requires exactly one active Surface.");
+            }
+            return new DesktopTransitionGuardArmContext(
+                selected.AttachmentLease,
+                matches[0].Surface.WindowHandle);
+        }
+    }
+
     public async Task<DesktopTopology> EnsureTopologyAsync(
         DisplayTopology displays,
         CancellationToken cancellationToken)
@@ -78,6 +124,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
             SelectedDesktopAdapter selected = await adapterSelector
                 .DiscoverAsync(shellSnapshot, cancellationToken)
                 .ConfigureAwait(false);
+            ValidateAttachmentCoordinateSpace(selected.AttachmentLease, displays);
             HashSet<DisplayId> nextDisplays = displays.Displays
                 .Select(display => display.Id)
                 .ToHashSet();
@@ -104,6 +151,32 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
         finally
         {
             operationGate.Release();
+        }
+    }
+
+    private static void ValidateAttachmentCoordinateSpace(
+        DesktopAttachmentLease attachmentLease,
+        DisplayTopology displays)
+    {
+        if (attachmentLease.AttachmentBounds is not ShellWindowBounds attachmentBounds ||
+            displays.Displays.Count == 0)
+        {
+            return;
+        }
+
+        DisplayBounds expected = DisplayBounds.Union(
+            displays.Displays.Select(display => display.Bounds));
+        if (attachmentBounds.X != expected.X ||
+            attachmentBounds.Y != expected.Y ||
+            attachmentBounds.Width != expected.Width ||
+            attachmentBounds.Height != expected.Height)
+        {
+            throw new DesktopAttachPointUnavailableException(
+                "UnexpectedTopologyMutation: the Raised Desktop parent coordinate space " +
+                $"({attachmentBounds.X},{attachmentBounds.Y} " +
+                $"{attachmentBounds.Width}x{attachmentBounds.Height}) does not match the " +
+                $"display topology virtual desktop ({expected.X},{expected.Y} " +
+                $"{expected.Width}x{expected.Height}).");
         }
     }
 
@@ -203,6 +276,7 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
                     replaced.Select(item => item.Surface.WindowHandle).ToArray(),
                     cancellationToken)
                 .ConfigureAwait(false);
+            Interlocked.Increment(ref replacementCount);
 
             lock (stateGate)
             {
@@ -221,6 +295,48 @@ public sealed class WindowsDesktopHost : IDesktopHost, IAsyncDisposable
                         State = DesktopSurfaceState.Active,
                     };
                 }
+            }
+        }
+        finally
+        {
+            operationGate.Release();
+        }
+    }
+
+    public async Task ResizeSurfaceAsync(
+        SurfaceId surfaceId,
+        SurfaceRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            TrackedSurface tracked;
+            SelectedDesktopAdapter selected;
+            lock (stateGate)
+            {
+                if (!surfaces.TryGetValue(surfaceId, out TrackedSurface? found) ||
+                    found.State != DesktopSurfaceState.Active)
+                {
+                    throw new InvalidOperationException(
+                        $"Surface '{surfaceId.Value}' is missing or is not active.");
+                }
+                tracked = found;
+                selected = selectedAdapter ??
+                    throw new InvalidOperationException("Desktop topology has not been initialized.");
+            }
+
+            await surfaceFactory.ResizeAsync(
+                    tracked.Surface.WindowHandle,
+                    request,
+                    selected.AttachmentLease,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            lock (stateGate)
+            {
+                surfaces[surfaceId] = tracked with { Request = request };
             }
         }
         finally

@@ -25,6 +25,12 @@ internal interface ISessionCoordinator
 
     TimeSpan GetApplyDeadline(int surfaceCount);
 
+    Task<IReadOnlyList<ActiveSurfaceResizeResult>> ResizeActiveSurfacesAsync(
+        IReadOnlyList<ActiveSurfaceResizeRequest> requests,
+        DisplayTopology topology,
+        long generation,
+        CancellationToken cancellationToken);
+
     Task<SessionRetirementBatchResult> RetireAsync(
         IReadOnlyList<PreparedSession> sessions,
         CancellationToken cancellationToken);
@@ -38,6 +44,7 @@ internal interface ISessionCoordinator
         IReadOnlyList<PreparedSession> activeSessions,
         DisplayTopology topology,
         long hostGeneration,
+        Action<DesktopRecoveryMilestone>? observer,
         CancellationToken cancellationToken);
 
     Task ReplaceRecoveredSurfacesAsync(
@@ -377,9 +384,19 @@ internal sealed class SessionCoordinator : ISessionCoordinator
 
             if (cleanupFailures.Count > 0)
             {
-                throw new AggregateException(
+                AggregateException aggregate = new(
                     "Wallpaper preparation failed and one or more provisional resources could not be released.",
                     [preparationFailure, .. cleanupFailures]);
+                if (preparationFailure is ApplyStageException staged)
+                {
+                    throw new ApplyStageException(
+                        staged.Phase,
+                        staged.Reason,
+                        $"{staged.Message} Provisional resource cleanup also reported " +
+                        $"{cleanupFailures.Count} failure(s).",
+                        aggregate);
+                }
+                throw aggregate;
             }
 
             operation.BeginPhase(failedPhase);
@@ -436,6 +453,7 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         IReadOnlyList<PreparedSession> activeSessions,
         DisplayTopology topology,
         long hostGeneration,
+        Action<DesktopRecoveryMilestone>? observer,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(activeSessions);
@@ -443,6 +461,11 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         DesktopTopology desktopTopology = await desktopHost
             .EnsureTopologyAsync(topology, cancellationToken)
             .ConfigureAwait(false);
+        observer?.Invoke(new DesktopRecoveryMilestone(
+            hostGeneration,
+            0,
+            topology.Displays.Select(display => display.Id).ToArray(),
+            DesktopRecoveryPhase.TopologyReady));
         Dictionary<DisplayId, DisplayDescriptor> displays = topology.Displays
             .ToDictionary(display => display.Id);
         List<RecoveredSession> recovered = [];
@@ -450,8 +473,10 @@ internal sealed class SessionCoordinator : ISessionCoordinator
 
         try
         {
-            foreach (PreparedSession active in activeSessions)
+            for (int sessionIndex = 0; sessionIndex < activeSessions.Count; sessionIndex++)
             {
+                PreparedSession active = activeSessions[sessionIndex];
+                int surfaceOrdinal = sessionIndex + 1;
                 if (active.Surfaces.Count != 1)
                 {
                     throw new InvalidOperationException(
@@ -465,6 +490,11 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                     .ConfigureAwait(false);
                 PreparedSurface provisionalSurface = new(provisional, previousSurface.Request);
                 provisionalSurfaces.Add(provisionalSurface);
+                observer?.Invoke(new DesktopRecoveryMilestone(
+                    hostGeneration,
+                    surfaceOrdinal,
+                    previousSurface.Request.DisplayIds,
+                    DesktopRecoveryPhase.SurfaceCreated));
                 double scaleFactor = previousSurface.Request.DisplayIds.Count == 1
                     ? displays[previousSurface.Request.DisplayIds[0]].ScaleFactor
                     : 1;
@@ -476,28 +506,69 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                             scaleFactor),
                         cancellationToken)
                     .ConfigureAwait(false);
-                await active.Renderer.SendAsync(
-                        new AttachRendererSurface(
-                            hostGeneration,
-                            provisional.WindowHandle,
-                            previousSurface.Request.Bounds,
-                            scaleFactor),
+                observer?.Invoke(new DesktopRecoveryMilestone(
+                    hostGeneration,
+                    surfaceOrdinal,
+                    previousSurface.Request.DisplayIds,
+                    DesktopRecoveryPhase.SetBoundsSent));
+                await WaitForBoundsFirstFrameAsync(
+                        active.Renderer,
+                        active.Session.Generation,
+                        "desktop recovery bounds resize",
                         cancellationToken)
                     .ConfigureAwait(false);
+                try
+                {
+                    await active.Renderer.SendAsync(
+                            new AttachRendererSurface(
+                                hostGeneration,
+                                provisional.WindowHandle,
+                                previousSurface.Request.Bounds,
+                                scaleFactor),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    throw new DesktopRecoveryStageException(
+                        DesktopRecoveryPhase.AttachSent,
+                        ApplyFailureReason.AttachWriteFailed,
+                        exception.Message,
+                        exception,
+                        surfaceOrdinal,
+                        previousSurface.Request.DisplayIds);
+                }
+                observer?.Invoke(new DesktopRecoveryMilestone(
+                    hostGeneration,
+                    surfaceOrdinal,
+                    previousSurface.Request.DisplayIds,
+                    DesktopRecoveryPhase.AttachSent));
                 await WaitForSurfaceAttachedAsync(
                         active.Renderer,
                         hostGeneration,
                         "desktop recovery attachment",
                         null,
-                        null,
-                        0,
+                        previousSurface.Request.DisplayIds,
+                        surfaceOrdinal,
                         cancellationToken)
                     .ConfigureAwait(false);
+                observer?.Invoke(new DesktopRecoveryMilestone(
+                    hostGeneration,
+                    surfaceOrdinal,
+                    previousSurface.Request.DisplayIds,
+                    DesktopRecoveryPhase.SurfaceAttached));
                 await WaitForFirstFrameAfterReattachAsync(
                         active.Renderer,
                         hostGeneration,
+                        previousSurface.Request.DisplayIds,
+                        surfaceOrdinal,
                         cancellationToken)
                     .ConfigureAwait(false);
+                observer?.Invoke(new DesktopRecoveryMilestone(
+                    hostGeneration,
+                    surfaceOrdinal,
+                    previousSurface.Request.DisplayIds,
+                    DesktopRecoveryPhase.FirstFramePresented));
                 recovered.Add(new RecoveredSession(
                     active,
                     active with
@@ -695,6 +766,7 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         if (renderer is not null)
         {
             bool shutdownSent = false;
+            Exception? shutdownFailure = null;
             try
             {
                 await renderer.SendAsync(
@@ -709,7 +781,7 @@ internal sealed class SessionCoordinator : ISessionCoordinator
             }
             catch (Exception exception)
             {
-                failures.Add(exception);
+                shutdownFailure = exception;
             }
 
             if (shutdownSent)
@@ -732,8 +804,19 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                 }
                 catch (Exception exception)
                 {
-                    failures.Add(exception);
+                    shutdownFailure = exception;
                 }
+            }
+
+            if (shutdownFailure is not null)
+            {
+                operation?.Record(
+                    ApplyGenerationPhase.ShutdownCompleted,
+                    displayIds,
+                    surfaceOrdinal,
+                    ApplyStageOutcome.Rejected,
+                    ApplyFailureReason.ShutdownFailed,
+                    shutdownFailure.Message);
             }
 
             try
@@ -932,6 +1015,16 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                 exception.Message,
                 exception);
         }
+        catch (TimeoutException exception) when (operation is null)
+        {
+            throw new DesktopRecoveryStageException(
+                DesktopRecoveryPhase.SurfaceAttached,
+                ApplyFailureReason.SurfaceAttachedTimeout,
+                exception.Message,
+                exception,
+                surfaceOrdinal,
+                displayIds);
+        }
         catch (Exception exception) when (
             operation is not null &&
             exception is not OperationCanceledException &&
@@ -949,6 +1042,19 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                 ApplyFailureReason.SurfaceAttachmentRejected,
                 exception.Message,
                 exception);
+        }
+        catch (Exception exception) when (
+            operation is null &&
+            exception is not OperationCanceledException &&
+            exception is not DesktopRecoveryStageException)
+        {
+            throw new DesktopRecoveryStageException(
+                DesktopRecoveryPhase.SurfaceAttached,
+                ApplyFailureReason.SurfaceAttachmentRejected,
+                exception.Message,
+                exception,
+                surfaceOrdinal,
+                displayIds);
         }
     }
 
@@ -1042,15 +1148,128 @@ internal sealed class SessionCoordinator : ISessionCoordinator
     private async Task WaitForFirstFrameAfterReattachAsync(
         IRendererSession renderer,
         long generation,
+        IReadOnlyList<DisplayId> displayIds,
+        int surfaceOrdinal,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (RendererEvent rendererEvent in ReadStageEventsAsync(
+                               renderer,
+                               "desktop recovery first frame",
+                               cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                const string phase = "desktop recovery first frame";
+                ValidateEventGeneration(rendererEvent, generation, phase);
+                switch (rendererEvent)
+                {
+                    case RendererFirstFramePresented:
+                        return;
+                    case RendererFailed failure:
+                        throw new InvalidOperationException(
+                            $"Renderer failed during {phase}: {failure.ErrorCode}.");
+                    case RendererPlaybackStateChanged:
+                        continue;
+                    default:
+                        throw UnexpectedRendererEvent(rendererEvent, phase);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Renderer event stream ended before FirstFramePresented during desktop recovery.");
+        }
+        catch (TimeoutException exception)
+        {
+            throw new DesktopRecoveryStageException(
+                DesktopRecoveryPhase.FirstFramePresented,
+                ApplyFailureReason.FirstFrameTimeout,
+                exception.Message,
+                exception,
+                surfaceOrdinal,
+                displayIds);
+        }
+        catch (Exception exception) when (
+            exception is not OperationCanceledException &&
+            exception is not DesktopRecoveryStageException)
+        {
+            throw new DesktopRecoveryStageException(
+                DesktopRecoveryPhase.FirstFramePresented,
+                ApplyFailureReason.FirstFrameRejected,
+                exception.Message,
+                exception,
+                surfaceOrdinal,
+                displayIds);
+        }
+    }
+
+    public async Task<IReadOnlyList<ActiveSurfaceResizeResult>> ResizeActiveSurfacesAsync(
+        IReadOnlyList<ActiveSurfaceResizeRequest> requests,
+        DisplayTopology topology,
+        long generation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(requests);
+        ArgumentNullException.ThrowIfNull(topology);
+        if (requests.Count == 0)
+        {
+            return [];
+        }
+        List<ActiveSurfaceResizeResult> resized = [];
+        foreach (ActiveSurfaceResizeRequest request in requests)
+        {
+            if (request.Session.Surfaces.Count != 1)
+            {
+                continue;
+            }
+
+            PreparedSurface current = request.Session.Surfaces[0];
+            SurfaceRequest next = new(
+                request.Target.DisplayIds,
+                request.Target.Bounds,
+                request.Target.FitMode);
+            try
+            {
+                // The Renderer prepares its child/swap chain first. The Host container is
+                // resized immediately afterwards, minimizing exposure of the Shell backdrop.
+                await request.Session.Renderer.SendAsync(
+                        new SetRendererBounds(generation, next.Bounds, request.ScaleFactor),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await WaitForBoundsFirstFrameAsync(
+                        request.Session.Renderer,
+                        request.Session.Session.Generation,
+                        "active Surface bounds resize",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await desktopHost.ResizeSurfaceAsync(
+                        current.Surface.Id,
+                        next,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                resized.Add(new ActiveSurfaceResizeResult(request.Session.Session.Id, next));
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Transition continuity is best-effort. The provisional replacement remains
+                // the authoritative transaction and must still be allowed to complete.
+            }
+        }
+        return Array.AsReadOnly(resized.ToArray());
+    }
+
+    private async Task WaitForBoundsFirstFrameAsync(
+        IRendererSession renderer,
+        long generation,
+        string phase,
         CancellationToken cancellationToken)
     {
         await foreach (RendererEvent rendererEvent in ReadStageEventsAsync(
                            renderer,
-                           "desktop recovery first frame",
+                           phase,
                            cancellationToken)
                            .ConfigureAwait(false))
         {
-            const string phase = "desktop recovery first frame";
             ValidateEventGeneration(rendererEvent, generation, phase);
             switch (rendererEvent)
             {
@@ -1067,7 +1286,7 @@ internal sealed class SessionCoordinator : ISessionCoordinator
         }
 
         throw new InvalidOperationException(
-            "Renderer event stream ended before FirstFramePresented during desktop recovery.");
+            $"Renderer event stream ended before FirstFramePresented during {phase}.");
     }
 
     private async Task WaitForShutdownCompletedAsync(
@@ -1184,6 +1403,15 @@ internal sealed record PreparedSession(
 
 internal sealed record PreparedSurface(
     DesktopSurface Surface,
+    SurfaceRequest Request);
+
+internal sealed record ActiveSurfaceResizeRequest(
+    PreparedSession Session,
+    PlannedSurface Target,
+    double ScaleFactor);
+
+internal sealed record ActiveSurfaceResizeResult(
+    SessionId SessionId,
     SurfaceRequest Request);
 
 internal sealed record PreparedRecovery(

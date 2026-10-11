@@ -168,6 +168,7 @@ public sealed class RendererProcessProviderTests
         await using IRendererSession session = await provider.CreateAsync(
             CreateContext(),
             CancellationToken.None);
+        launcher.ReleaseExitAfterHandshake();
 
         await using IAsyncEnumerator<RendererEvent> events = session
             .ReadEventsAsync(CancellationToken.None)
@@ -220,7 +221,8 @@ public sealed class RendererProcessProviderTests
             1,
             2,
             ProbeFaultPhase.FirstFramePresented,
-            ProbeFaultAction.SuppressEvent);
+            ProbeFaultAction.SuppressEvent,
+            TargetOccurrence: 2);
 
         lock (EnvironmentGate)
         {
@@ -279,6 +281,8 @@ public sealed class RendererProcessProviderTests
         : IRendererProcessLauncher, IDisposable
     {
         private readonly CancellationTokenSource lifetime = new();
+        private readonly TaskCompletionSource exitAfterHandshake = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         private Task? runTask;
 
         public bool InitializeObserved { get; private set; }
@@ -286,6 +290,8 @@ public sealed class RendererProcessProviderTests
         public bool Terminated { get; private set; }
 
         public RendererProcessStartRequest? LastRequest { get; private set; }
+
+        public void ReleaseExitAfterHandshake() => exitAfterHandshake.TrySetResult();
 
         public IRendererProcessHandle Start(RendererProcessStartRequest request)
         {
@@ -335,6 +341,7 @@ public sealed class RendererProcessProviderTests
                 cancellationToken).ConfigureAwait(false);
             if (behavior == FakeRendererBehavior.ExitAfterHandshake)
             {
+                await exitAfterHandshake.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
                 return;
             }
             if (behavior is FakeRendererBehavior.DuplicateSurfaceEvent or

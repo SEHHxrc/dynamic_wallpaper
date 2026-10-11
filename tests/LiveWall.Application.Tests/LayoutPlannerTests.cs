@@ -61,6 +61,39 @@ public sealed class LayoutPlannerTests
         create.Should().Throw<ArgumentException>().WithParameterName("assignments");
     }
 
+    [Fact]
+    public void SpanIntersectingUnassignedConnectedDisplayIsRejected()
+    {
+        DisplayTopology topology = CreateIntersectingTopology();
+        WallpaperAssignment[] assignments =
+        [
+            new(new DisplayId("left"), new WallpaperId("sample.span"), LayoutMode.Span, FitMode.Cover, null),
+            new(new DisplayId("right"), new WallpaperId("sample.span"), LayoutMode.Span, FitMode.Cover, null),
+        ];
+
+        Action create = () => planner.CreatePlan(topology, assignments);
+
+        create.Should().Throw<InvalidOperationException>()
+            .WithMessage("SpanLayoutIntersectsNonMemberDisplay:*");
+    }
+
+    [Fact]
+    public void SpanCannotRelyOnPerDisplaySurfaceToHidePhysicalOverlap()
+    {
+        DisplayTopology topology = CreateIntersectingTopology();
+        WallpaperAssignment[] assignments =
+        [
+            new(new DisplayId("left"), new WallpaperId("sample.span"), LayoutMode.Span, FitMode.Cover, null),
+            new(new DisplayId("right"), new WallpaperId("sample.span"), LayoutMode.Span, FitMode.Cover, null),
+            new(new DisplayId("middle"), new WallpaperId("sample.middle"), LayoutMode.PerDisplay, FitMode.Cover, null),
+        ];
+
+        Action create = () => planner.CreatePlan(topology, assignments);
+
+        create.Should().Throw<InvalidOperationException>()
+            .WithMessage("SpanLayoutIntersectsNonMemberDisplay:*");
+    }
+
     private static DisplayTopology CreateTopology() =>
         new(
             7,
@@ -79,5 +112,32 @@ public sealed class LayoutPlannerTests
                     1.25,
                     144,
                     true),
+            ]);
+
+    private static DisplayTopology CreateIntersectingTopology() =>
+        new(
+            8,
+            [
+                new DisplayDescriptor(
+                    new DisplayId("left"),
+                    "display/left",
+                    new DisplayBounds(0, 0, 100, 100),
+                    1,
+                    60,
+                    true),
+                new DisplayDescriptor(
+                    new DisplayId("middle"),
+                    "display/middle",
+                    new DisplayBounds(100, 20, 100, 50),
+                    1.25,
+                    60,
+                    false),
+                new DisplayDescriptor(
+                    new DisplayId("right"),
+                    "display/right",
+                    new DisplayBounds(200, 0, 100, 100),
+                    1.5,
+                    60,
+                    false),
             ]);
 }

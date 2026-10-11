@@ -2,7 +2,22 @@ using LiveWall.Platform.Windows.NativeMethods;
 
 namespace LiveWall.Platform.Windows.Desktop;
 
-public sealed class ExplorerMonitor : IDisposable
+internal interface IExplorerChangeMonitor : IDisposable
+{
+    event EventHandler<ExplorerRestartedEventArgs>? Restarted;
+
+    event EventHandler<ExplorerValidationFailedEventArgs>? ValidationFailed;
+
+    event EventHandler<ExplorerValidationCompletedEventArgs>? ValidationCompleted;
+
+    void Start();
+
+    void Stop();
+
+    void RequestValidation();
+}
+
+public sealed class ExplorerMonitor : IExplorerChangeMonitor
 {
     private static readonly TimeSpan DefaultDebounceInterval = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan DefaultFallbackPollInterval = TimeSpan.FromSeconds(2);
@@ -60,6 +75,8 @@ public sealed class ExplorerMonitor : IDisposable
 
     public event EventHandler<ExplorerValidationFailedEventArgs>? ValidationFailed;
 
+    public event EventHandler<ExplorerValidationCompletedEventArgs>? ValidationCompleted;
+
     public void Start()
     {
         lock (gate)
@@ -107,10 +124,11 @@ public sealed class ExplorerMonitor : IDisposable
     internal void CheckNow()
     {
         ExplorerRestartedEventArgs? notification = null;
+        ulong currentProgmanHandle;
         lock (gate)
         {
             ThrowIfDisposed();
-            ulong currentProgmanHandle = shellProbe.GetProgmanHandle();
+            currentProgmanHandle = shellProbe.GetProgmanHandle();
             ulong? attachPoint = trackedAttachPoint();
             bool progmanRecreated = lastProgmanHandle != 0 &&
                 currentProgmanHandle != 0 &&
@@ -146,6 +164,12 @@ public sealed class ExplorerMonitor : IDisposable
         {
             Restarted?.Invoke(this, notification);
         }
+        ValidationCompleted?.Invoke(
+            this,
+            new ExplorerValidationCompletedEventArgs(
+                currentProgmanHandle != 0,
+                notification is not null,
+                currentProgmanHandle));
     }
 
     private void OnTimer(object? state)
@@ -191,6 +215,18 @@ public sealed class ExplorerValidationFailedEventArgs(Exception exception) : Eve
 {
     public Exception Exception { get; } = exception ??
         throw new ArgumentNullException(nameof(exception));
+}
+
+public sealed class ExplorerValidationCompletedEventArgs(
+    bool shellAvailable,
+    bool shellChanged,
+    ulong currentProgmanHandle) : EventArgs
+{
+    public bool ShellAvailable { get; } = shellAvailable;
+
+    public bool ShellChanged { get; } = shellChanged;
+
+    public ulong CurrentProgmanHandle { get; } = currentProgmanHandle;
 }
 
 internal interface IExplorerShellProbe

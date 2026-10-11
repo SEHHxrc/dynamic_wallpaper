@@ -59,7 +59,7 @@
 2. Renderer-child DComp 探针已通过独立进程、现有 `AttachSurface`、自有 child HWND/DComp target/交换链、首帧、正常/取消/崩溃清理与跨 Explorer generation 重附着验收，保留 Renderer Protocol v1。正式产品候选已补齐完整会话、双屏原子提交、90 秒长驻、10 次 process-cold 和同一 Host 20 轮连续替换；P1.6 当前门禁关闭，正式局部故障与双屏 Explorer 仍待验收。
 3. Platform.Windows 内部 Lease 和 Application 无句柄能力描述符已经落地；Native Surface Factory 已消费 parent/anchor/backdrop/generation，并在跨 generation 替换时不再触碰旧 HWND。
 4. 当前不设计协议 1.1；只有未来证据证明必须由 Host 合成 Renderer 帧或传递非容器 HWND 的跨进程 GPU 对象时，才重开强类型 `SurfaceBinding`、资源所有权、handle/fence、Schema 和契约测试。
-5. 显式诊断模式已接通 Host command loop / SessionCoordinator → Adapter → Lease → Native Factory → Renderer v1 全链；generation 终态、时间线、按 Surface 数量推导的 deadline 及与长期 Session retirement 的解耦均已完成。P1.6 双屏长驻、process-cold 和连续原子替换已经通过，历史固定 15 秒样本继续保留。下一步先以诊断专用故障计划验证首次零提交、旧双屏保留、提交后退休异常隔离和双屏 Explorer 整批恢复；故障开关不得进入协议 DTO 或生产配置。之后再设计热插拔/主屏切换所需的拓扑重规划状态机。全部矩阵通过后才允许添加精确 build/UBR allowlist。
+5. 显式诊断模式已接通 Host command loop / SessionCoordinator → Adapter → Lease → Native Factory → Renderer v1 全链；generation 终态、时间线、按 Surface 数量推导的 deadline 及与长期 Session retirement 的解耦均已完成。P1.6 双屏长驻、process-cold 和连续原子替换以及 P1.7 故障/Explorer 代表矩阵已经通过，历史固定 15 秒样本继续保留。P1.8 拓扑重规划状态机也已实现，并在 `26200.9445` 完成负坐标外接屏断开/重连、快速 revision 抢占及伴随坐标原点重排的主屏切换；完整 DPI/bounds 和剩余会话矩阵通过后才允许评估精确 build/UBR allowlist。
    P1.6 可靠性驱动现已落地：单次结果使用脱敏 JSON，批次测试直接启动已构建的 Release 进程且不以重试替换失败，显式 soak 独立于普通 30 秒上限，同 Host 循环在进入下一轮前等待上一 Session retirement。该驱动不改变协议 DTO、Schema 或生产能力；其存在不能替代 `WinSta0\Default` 的 10/90/20 真实样本。
 6. 任一步失败均回到 `Not supported`；不得回退为直接附着 Progman。
 

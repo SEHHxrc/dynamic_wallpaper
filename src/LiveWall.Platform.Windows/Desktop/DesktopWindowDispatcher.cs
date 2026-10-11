@@ -39,7 +39,10 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
     private readonly string className = $"LiveWall.DesktopDispatcher.{Environment.ProcessId}.{Guid.NewGuid():N}";
     private nint instance;
     private nint signalWindow;
+    private nint displayPowerNotification;
+    private nint powerSourceNotification;
     private uint taskbarCreatedMessage;
+    private bool sessionNotificationsRegistered;
     private bool accepting = true;
     private bool shutdownRequested;
 
@@ -184,6 +187,8 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
                     "Could not create the Desktop Window Dispatcher signal window.");
             }
 
+            RegisterSystemNotifications();
+
             ready.TrySetResult();
             while (!shutdownRequested)
             {
@@ -259,7 +264,110 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
             return 0;
         }
 
+        if (message == SystemStateNativeMethods.WindowMessageSessionChange)
+        {
+            DesktopWindowSignal? signal = wParam switch
+            {
+                SystemStateNativeMethods.SessionLock =>
+                    new DesktopWindowSignal(DesktopWindowSignalKind.SessionLocked),
+                SystemStateNativeMethods.SessionUnlock =>
+                    new DesktopWindowSignal(DesktopWindowSignalKind.SessionUnlocked),
+                SystemStateNativeMethods.SessionConsoleDisconnect or
+                    SystemStateNativeMethods.SessionRemoteDisconnect =>
+                    new DesktopWindowSignal(DesktopWindowSignalKind.SessionDisconnected),
+                SystemStateNativeMethods.SessionConsoleConnect =>
+                    new DesktopWindowSignal(DesktopWindowSignalKind.SessionReconnected),
+                SystemStateNativeMethods.SessionRemoteConnect =>
+                    new DesktopWindowSignal(DesktopWindowSignalKind.SessionReconnected),
+                _ => null,
+            };
+            if (signal is not null)
+            {
+                signals.Writer.TryWrite(signal);
+            }
+            return 0;
+        }
+
+        if (message == SystemStateNativeMethods.WindowMessagePowerBroadcast)
+        {
+            DesktopWindowSignal? signal = wParam switch
+            {
+                SystemStateNativeMethods.PowerBroadcastSuspend =>
+                    new DesktopWindowSignal(DesktopWindowSignalKind.SystemSuspending),
+                SystemStateNativeMethods.PowerBroadcastResumeSuspend or
+                    SystemStateNativeMethods.PowerBroadcastResumeAutomatic =>
+                    new DesktopWindowSignal(DesktopWindowSignalKind.SystemResuming),
+                _ => CreatePowerSettingSignal(wParam, lParam),
+            };
+            if (signal is not null)
+            {
+                signals.Writer.TryWrite(signal);
+            }
+            return 1;
+        }
+
         return DesktopNativeMethods.DefWindowProc(window, message, wParam, lParam);
+    }
+
+    private void RegisterSystemNotifications()
+    {
+        if (!SystemStateNativeMethods.WTSRegisterSessionNotification(
+                signalWindow,
+                SystemStateNativeMethods.NotifyForThisSession))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not register the Desktop Window Dispatcher for session notifications.");
+        }
+        sessionNotificationsRegistered = true;
+
+        Guid displayState = SystemStateNativeMethods.ConsoleDisplayState;
+        displayPowerNotification = SystemStateNativeMethods.RegisterPowerSettingNotification(
+            signalWindow,
+            ref displayState,
+            SystemStateNativeMethods.DeviceNotifyWindowHandle);
+        if (displayPowerNotification == 0)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not register for console display power notifications.");
+        }
+
+        Guid powerSource = SystemStateNativeMethods.AcDcPowerSource;
+        powerSourceNotification = SystemStateNativeMethods.RegisterPowerSettingNotification(
+            signalWindow,
+            ref powerSource,
+            SystemStateNativeMethods.DeviceNotifyWindowHandle);
+        if (powerSourceNotification == 0)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not register for AC/DC power source notifications.");
+        }
+    }
+
+    private static DesktopWindowSignal? CreatePowerSettingSignal(nuint wParam, nint lParam)
+    {
+        if (wParam != SystemStateNativeMethods.PowerBroadcastSettingChange ||
+            !SystemStateNativeMethods.TryReadPowerSetting(lParam, out Guid setting, out uint value))
+        {
+            return null;
+        }
+
+        if (setting == SystemStateNativeMethods.ConsoleDisplayState)
+        {
+            return new DesktopWindowSignal(
+                value == 0
+                    ? DesktopWindowSignalKind.DisplayPoweredOff
+                    : DesktopWindowSignalKind.DisplayPoweredOn,
+                value);
+        }
+
+        return setting == SystemStateNativeMethods.AcDcPowerSource
+            ? new DesktopWindowSignal(
+                DesktopWindowSignalKind.PowerSourceChanged,
+                value == 1 ? 1u : 0u)
+            : null;
     }
 
     private void DrainWorkItems()
@@ -281,6 +389,21 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
     private void CleanupOnOwnerThread()
     {
         FailPendingWork(new ObjectDisposedException(nameof(DesktopWindowDispatcher)));
+        if (powerSourceNotification != 0)
+        {
+            _ = SystemStateNativeMethods.UnregisterPowerSettingNotification(powerSourceNotification);
+            powerSourceNotification = 0;
+        }
+        if (displayPowerNotification != 0)
+        {
+            _ = SystemStateNativeMethods.UnregisterPowerSettingNotification(displayPowerNotification);
+            displayPowerNotification = 0;
+        }
+        if (sessionNotificationsRegistered && signalWindow != 0)
+        {
+            _ = SystemStateNativeMethods.WTSUnRegisterSessionNotification(signalWindow);
+            sessionNotificationsRegistered = false;
+        }
         if (signalWindow != 0)
         {
             _ = DesktopNativeMethods.DestroyWindow(signalWindow);
@@ -370,6 +493,16 @@ public enum DesktopWindowSignalKind
     TaskbarCreated,
     DisplayChanged,
     DpiChanged,
+    SessionLocked,
+    SessionUnlocked,
+    SessionDisconnected,
+    SessionReconnected,
+    RemoteSessionChanged,
+    DisplayPoweredOff,
+    DisplayPoweredOn,
+    SystemSuspending,
+    SystemResuming,
+    PowerSourceChanged,
 }
 
-public sealed record DesktopWindowSignal(DesktopWindowSignalKind Kind);
+public sealed record DesktopWindowSignal(DesktopWindowSignalKind Kind, uint Value = 0);

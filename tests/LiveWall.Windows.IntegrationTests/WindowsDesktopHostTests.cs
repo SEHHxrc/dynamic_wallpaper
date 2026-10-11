@@ -143,6 +143,11 @@ public sealed class WindowsDesktopHostTests
         await host.ReplaceSurfacesAsync(
             new SurfaceReplacement([surface.Id], [], initial.Revision),
             CancellationToken.None);
+        SurfaceRequest resizedRequest = request with
+        {
+            Bounds = new DisplayBounds(-100, 20, 1024, 768),
+        };
+        await host.ResizeSurfaceAsync(surface.Id, resizedRequest, CancellationToken.None);
         DesktopTopology recovered = await host.RecoverAsync(
             CancellationToken.None);
         await host.DestroySurfaceAsync(surface.Id, CancellationToken.None);
@@ -159,6 +164,8 @@ public sealed class WindowsDesktopHostTests
         surfaceFactory.Replacements.Should().ContainSingle();
         surfaceFactory.Replacements[0].Provisional.Should().Equal(1000UL);
         surfaceFactory.Replacements[0].Replaced.Should().BeEmpty();
+        surfaceFactory.Resized.Should().ContainSingle().Which.Should().Be(
+            (1000UL, resizedRequest, surfaceFactory.Created[0].AttachmentLease));
         surfaceFactory.Destroyed.Should().Equal(1000UL);
         surfaceFactory.Created[0].AttachmentLease.ParentWindowHandle.Should().Be(100);
     }
@@ -194,6 +201,48 @@ public sealed class WindowsDesktopHostTests
 
         await action.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not connected*");
+    }
+
+    [Fact]
+    public async Task HostRejectsRaisedLeaseWhoseCoordinateSpaceDoesNotMatchDisplayTopology()
+    {
+        DisplayTopology displays = new(4, [
+            new DisplayDescriptor(
+                new DisplayId("internal"),
+                "internal-device",
+                new DisplayBounds(0, 0, 1200, 1920),
+                1.75,
+                60,
+                true),
+            new DisplayDescriptor(
+                new DisplayId("external"),
+                "external-device",
+                new DisplayBounds(-3840, 0, 3840, 2160),
+                1.75,
+                60,
+                false),
+        ]);
+        DesktopAttachmentLease staleLease = DesktopAttachmentLease.CreateRaised(
+            RaisedDesktopAdapter.AdapterId,
+            parentWindowHandle: 10,
+            zOrderAnchorWindowHandle: 11,
+            backdropWindowHandle: 12,
+            shellWindowHandle: 10,
+            shellProcessId: 20,
+            structuralFingerprint: "stale-landscape-fingerprint",
+            attachmentBounds: new ShellWindowBounds(-3840, 0, 5760, 2160));
+        FakeDesktopAdapter adapter = new(supported: true, staleLease);
+        await using WindowsDesktopHost host = new(
+            ShellSnapshot(),
+            new DesktopHostAdapterSelector([adapter]),
+            new FakeDesktopSurfaceFactory());
+
+        Func<Task> ensure = () => host.EnsureTopologyAsync(
+            displays,
+            CancellationToken.None);
+
+        await ensure.Should().ThrowAsync<DesktopAttachPointUnavailableException>()
+            .WithMessage("UnexpectedTopologyMutation:*does not match*");
     }
 
     [Fact]
@@ -284,6 +333,8 @@ public sealed class WindowsDesktopHostTests
 
         public List<(IReadOnlyList<ulong> Provisional, IReadOnlyList<ulong> Replaced)> Replacements { get; } = [];
 
+        public List<(ulong Handle, SurfaceRequest Request, DesktopAttachmentLease AttachmentLease)> Resized { get; } = [];
+
         public List<ulong> Destroyed { get; } = [];
 
         public List<ulong> Abandoned { get; } = [];
@@ -317,6 +368,17 @@ public sealed class WindowsDesktopHostTests
             Replacements.Add((
                 provisionalSurfaceHandles.ToArray(),
                 replacedSurfaceHandles.ToArray()));
+            return Task.CompletedTask;
+        }
+
+        public Task ResizeAsync(
+            ulong surfaceHandle,
+            SurfaceRequest request,
+            DesktopAttachmentLease attachmentLease,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Resized.Add((surfaceHandle, request, attachmentLease));
             return Task.CompletedTask;
         }
 

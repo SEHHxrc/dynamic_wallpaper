@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LiveWall.Application.Sessions;
 using LiveWall.Domain.Displays;
 
@@ -6,11 +7,22 @@ namespace LiveWall.Platform.Windows.Displays;
 public sealed class WindowsDisplayTopologySource : IDisplayTopologySource, IDisposable
 {
     private static readonly TimeSpan DefaultDebounceInterval = TimeSpan.FromMilliseconds(350);
+    private static readonly TimeSpan[] RefreshFailureRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(350),
+        TimeSpan.FromSeconds(1),
+        TimeSpan.FromSeconds(2),
+    ];
     private readonly object gate = new();
+    private readonly object refreshGate = new();
     private readonly IDisplaySnapshotProvider snapshotProvider;
     private readonly TimeSpan debounceInterval;
     private readonly Timer refreshTimer;
     private DisplayTopology current = new(0, []);
+    private int refreshFailureAttempt;
+    private int immediateRefreshQueued;
+    private bool emptyCandidatePending;
+    private long emptyCandidateStartedTimestamp;
     private bool disposed;
 
     public WindowsDisplayTopologySource()
@@ -53,37 +65,134 @@ public sealed class WindowsDisplayTopologySource : IDisplayTopologySource, IDisp
     public DisplayTopology Refresh()
     {
         ThrowIfDisposed();
-        DisplayDescriptor[] displays = snapshotProvider.Read()
-            .Select(CreateDescriptor)
-            .OrderByDescending(display => display.IsPrimary)
-            .ThenBy(display => display.Bounds.Y)
-            .ThenBy(display => display.Bounds.X)
-            .ThenBy(display => display.Id.Value, StringComparer.Ordinal)
-            .ToArray();
-        EnsureUniqueIds(displays);
-
-        DisplayTopology previous;
-        DisplayTopology next;
-        lock (gate)
+        DisplayTopology? published = null;
+        DisplayTopology result;
+        lock (refreshGate)
         {
-            previous = current;
-            if (DisplaysEqual(previous.Displays, displays))
+            DisplayDescriptor[] displays;
+            try
             {
-                return previous;
+                displays = snapshotProvider.Read()
+                    .Select(CreateDescriptor)
+                    .OrderByDescending(display => display.IsPrimary)
+                    .ThenBy(display => display.Bounds.Y)
+                    .ThenBy(display => display.Bounds.X)
+                    .ThenBy(display => display.Id.Value, StringComparer.Ordinal)
+                    .ToArray();
+                EnsureUniqueIds(displays);
+            }
+            catch
+            {
+                lock (gate)
+                {
+                    CancelEmptyCandidateUnsafe();
+                }
+
+                throw;
             }
 
-            next = new DisplayTopology(checked(previous.Revision + 1), displays);
-            current = next;
+            lock (gate)
+            {
+                DisplayTopology previous = current;
+                refreshFailureAttempt = 0;
+
+                // The first successful sample establishes the startup state, including the
+                // distinct case where the process starts without an attached display.
+                if (previous.Revision == 0)
+                {
+                    result = new DisplayTopology(1, displays);
+                    current = result;
+                    published = previous;
+                }
+                else if (previous.Displays.Count > 0 && displays.Length == 0)
+                {
+                    long now = Stopwatch.GetTimestamp();
+                    if (!emptyCandidatePending)
+                    {
+                        emptyCandidatePending = true;
+                        emptyCandidateStartedTimestamp = now;
+                        ScheduleEmptyConfirmationUnsafe(debounceInterval);
+                        return previous;
+                    }
+
+                    TimeSpan elapsed = Stopwatch.GetElapsedTime(emptyCandidateStartedTimestamp, now);
+                    if (elapsed < debounceInterval)
+                    {
+                        ScheduleEmptyConfirmationUnsafe(debounceInterval - elapsed);
+                        return previous;
+                    }
+
+                    CancelEmptyCandidateUnsafe();
+                    result = new DisplayTopology(checked(previous.Revision + 1), displays);
+                    current = result;
+                    published = previous;
+                }
+                else
+                {
+                    if (displays.Length > 0)
+                    {
+                        CancelEmptyCandidateUnsafe();
+                    }
+
+                    if (DisplaysEqual(previous.Displays, displays))
+                    {
+                        return previous;
+                    }
+
+                    result = new DisplayTopology(checked(previous.Revision + 1), displays);
+                    current = result;
+                    published = previous;
+                }
+            }
         }
 
-        Changed?.Invoke(this, new DisplayTopologyChangedEventArgs(previous, next));
-        return next;
+        Changed?.Invoke(this, new DisplayTopologyChangedEventArgs(published!, result));
+        return result;
     }
 
     public void RequestRefresh()
     {
         ThrowIfDisposed();
+        lock (gate)
+        {
+            refreshFailureAttempt = 0;
+        }
         refreshTimer.Change(debounceInterval, Timeout.InfiniteTimeSpan);
+    }
+
+    /// <summary>
+    /// Requests a best-effort immediate snapshot for visual continuity and retains the normal
+    /// debounced refresh as the authoritative stability check.
+    /// </summary>
+    public void RequestTransitionRefresh()
+    {
+        RequestRefresh();
+        if (Interlocked.Exchange(ref immediateRefreshQueued, 1) != 0)
+        {
+            return;
+        }
+
+        ThreadPool.QueueUserWorkItem(static state =>
+        {
+            WindowsDisplayTopologySource source = (WindowsDisplayTopologySource)state!;
+            try
+            {
+                source.Refresh();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (Exception exception)
+            {
+                source.RefreshFailed?.Invoke(
+                    source,
+                    new DisplayTopologyRefreshFailedEventArgs(exception));
+            }
+            finally
+            {
+                Interlocked.Exchange(ref source.immediateRefreshQueued, 0);
+            }
+        }, this);
     }
 
     public void Dispose()
@@ -96,6 +205,7 @@ public sealed class WindowsDisplayTopologySource : IDisplayTopologySource, IDisp
             }
 
             disposed = true;
+            CancelEmptyCandidateUnsafe();
         }
 
         refreshTimer.Dispose();
@@ -151,7 +261,29 @@ public sealed class WindowsDisplayTopologySource : IDisplayTopologySource, IDisp
         catch (Exception exception)
         {
             RefreshFailed?.Invoke(this, new DisplayTopologyRefreshFailedEventArgs(exception));
+            lock (gate)
+            {
+                if (!disposed && refreshFailureAttempt < RefreshFailureRetryDelays.Length)
+                {
+                    TimeSpan retryDelay = RefreshFailureRetryDelays[refreshFailureAttempt++];
+                    refreshTimer.Change(retryDelay, Timeout.InfiniteTimeSpan);
+                }
+            }
         }
+    }
+
+    private void ScheduleEmptyConfirmationUnsafe(TimeSpan delay)
+    {
+        if (!disposed)
+        {
+            refreshTimer.Change(delay, Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    private void CancelEmptyCandidateUnsafe()
+    {
+        emptyCandidatePending = false;
+        emptyCandidateStartedTimestamp = 0;
     }
 
     private void ThrowIfDisposed()

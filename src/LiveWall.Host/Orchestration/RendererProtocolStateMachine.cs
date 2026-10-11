@@ -48,6 +48,7 @@ internal sealed class RendererProtocolStateMachine
 
             case SetRendererBounds bounds when
                 state == RendererProtocolState.Running && bounds.Generation >= Generation:
+                state = RendererProtocolState.AwaitingBoundsFirstFrame;
                 break;
 
             case ChangeRendererState playback when
@@ -91,7 +92,8 @@ internal sealed class RendererProtocolStateMachine
                 break;
             case RendererFirstFramePresented when
                 state is RendererProtocolState.AwaitingInitialFirstFrame or
-                    RendererProtocolState.AwaitingReattachFirstFrame:
+                    RendererProtocolState.AwaitingReattachFirstFrame or
+                    RendererProtocolState.AwaitingBoundsFirstFrame:
                 state = RendererProtocolState.Running;
                 break;
             case RendererPlaybackStateChanged when state == RendererProtocolState.Running:
@@ -120,6 +122,7 @@ internal sealed class RendererProtocolStateMachine
         AwaitingContentLoaded,
         AwaitingInitialFirstFrame,
         AwaitingReattachFirstFrame,
+        AwaitingBoundsFirstFrame,
         Running,
         ShuttingDown,
         Closed,

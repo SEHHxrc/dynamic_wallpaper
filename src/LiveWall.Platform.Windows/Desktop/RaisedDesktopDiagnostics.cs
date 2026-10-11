@@ -154,6 +154,10 @@ public static class RaisedDesktopDiagnostics
         ShellWindowFingerprint? competingSurface = requestedSnapshot.ShellDescendants
             .Where(window =>
                 window.ParentWindowHandle == requested.Context.ProgmanWindowHandle &&
+                !RaisedDesktopOwnedWindowRegistry.Contains(
+                    unchecked((nint)(long)window.WindowHandle)) &&
+                !RaisedDesktopDiagnosticWindowRegistry.Contains(
+                    unchecked((nint)(long)window.WindowHandle)) &&
                 window.ProcessId != requested.Context.ProgmanProcessId &&
                 window.IsVisible &&
                 window.Bounds == virtualDesktopBounds &&
@@ -177,7 +181,8 @@ public static class RaisedDesktopDiagnostics
             requested.Context.WorkerWindowHandle,
             requestedSnapshot.ShellWindowHandle,
             requested.Context.ProgmanProcessId,
-            requested.AfterFingerprint.Value);
+            requested.AfterFingerprint.Value,
+            virtualDesktopBounds);
     }
 
     internal static RaisedDesktopAnalysis AnalyzePreflight(

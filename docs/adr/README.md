@@ -14,3 +14,4 @@ ADR 用于记录会影响多个模块、公开协议、安全模型或长期维�
 - `006` 本地 Named Pipe 身份、发现与单实例
 - `007` Desktop Surface 窗口线程、显式交换与 Shell 恢复
 - `008` 桌面结构候选、可呈现附着能力与 Surface Binding 分离
+- `009` 有限 Transition Guard 仅作为预呈现可行性探针

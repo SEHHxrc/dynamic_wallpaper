@@ -98,6 +98,7 @@ internal static class Program
         bool hasAttached = false;
         bool contentLoaded = false;
         bool faultConsumed = false;
+        Dictionary<ProbeFaultPhase, int> faultOccurrences = [];
         try
         {
             while (true)
@@ -125,7 +126,8 @@ internal static class Program
                                 command.Generation,
                                 faultPlan,
                                 ProbeFaultPhase.ShutdownCompleted,
-                                faultConsumed)
+                                faultConsumed,
+                                faultOccurrences)
                             .ConfigureAwait(false);
                         faultConsumed |= shutdownFault != ProbeFaultDisposition.None;
                         if (shutdownFault == ProbeFaultDisposition.Suppress)
@@ -154,7 +156,23 @@ internal static class Program
                         {
                             throw InvalidState(command, "SetBounds requires loaded content and a current or newer generation.");
                         }
-                        _ = ReadPayload<SetBoundsPayload>(command);
+                        SetBoundsPayload bounds = ReadPayload<SetBoundsPayload>(command);
+                        if (graphics is null)
+                        {
+                            throw InvalidState(command, "SetBounds requires an attached graphics Surface.");
+                        }
+                        await graphics.ResizeAsync(
+                                bounds.Width,
+                                bounds.Height,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                        await channel.WriteAsync(CreateEnvelope(
+                                sessionId,
+                                currentGeneration,
+                                RendererEventTypes.FirstFramePresented,
+                                new FirstFramePresentedPayload(
+                                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())))
+                            .ConfigureAwait(false);
                         break;
 
                     case RendererCommandTypes.AttachSurface:
@@ -185,7 +203,8 @@ internal static class Program
                                 currentGeneration,
                                 faultPlan,
                                 ProbeFaultPhase.SurfaceAttached,
-                                faultConsumed)
+                                faultConsumed,
+                                faultOccurrences)
                             .ConfigureAwait(false);
                         faultConsumed |= attachFault != ProbeFaultDisposition.None;
                         if (attachFault == ProbeFaultDisposition.Suppress)
@@ -208,6 +227,30 @@ internal static class Program
                             .ConfigureAwait(false);
                         if (contentLoaded)
                         {
+                            ProbeFaultDisposition recoveryFirstFrameFault =
+                                await ApplyFaultAsync(
+                                        channel,
+                                        sessionId,
+                                        currentGeneration,
+                                        faultPlan,
+                                        ProbeFaultPhase.FirstFramePresented,
+                                        faultConsumed,
+                                        faultOccurrences)
+                                    .ConfigureAwait(false);
+                            faultConsumed |= recoveryFirstFrameFault !=
+                                ProbeFaultDisposition.None;
+                            if (recoveryFirstFrameFault == ProbeFaultDisposition.Suppress)
+                            {
+                                break;
+                            }
+                            if (recoveryFirstFrameFault == ProbeFaultDisposition.Fatal)
+                            {
+                                return InjectedFatalExitCode;
+                            }
+                            if (recoveryFirstFrameFault == ProbeFaultDisposition.Exit)
+                            {
+                                return InjectedProcessExitCode;
+                            }
                             await PresentAndReportAsync(
                                     channel,
                                     graphics,
@@ -232,7 +275,8 @@ internal static class Program
                                 currentGeneration,
                                 faultPlan,
                                 ProbeFaultPhase.ContentLoaded,
-                                faultConsumed)
+                                faultConsumed,
+                                faultOccurrences)
                             .ConfigureAwait(false);
                         faultConsumed |= contentFault != ProbeFaultDisposition.None;
                         if (contentFault == ProbeFaultDisposition.Suppress)
@@ -259,7 +303,8 @@ internal static class Program
                                 currentGeneration,
                                 faultPlan,
                                 ProbeFaultPhase.FirstFramePresented,
-                                faultConsumed)
+                                faultConsumed,
+                                faultOccurrences)
                             .ConfigureAwait(false);
                         faultConsumed |= firstFrameFault != ProbeFaultDisposition.None;
                         if (firstFrameFault == ProbeFaultDisposition.Suppress)
@@ -302,9 +347,17 @@ internal static class Program
         long generation,
         ProbeFaultPlan? plan,
         ProbeFaultPhase phase,
-        bool faultConsumed)
+        bool faultConsumed,
+        Dictionary<ProbeFaultPhase, int> faultOccurrences)
     {
         if (plan is null || faultConsumed || plan.Phase != phase)
+        {
+            return ProbeFaultDisposition.None;
+        }
+
+        int occurrence = faultOccurrences.GetValueOrDefault(phase) + 1;
+        faultOccurrences[phase] = occurrence;
+        if (occurrence != plan.TargetOccurrence)
         {
             return ProbeFaultDisposition.None;
         }

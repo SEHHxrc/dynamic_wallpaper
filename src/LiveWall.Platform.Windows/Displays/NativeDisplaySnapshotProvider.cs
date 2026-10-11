@@ -10,54 +10,96 @@ internal sealed class NativeDisplaySnapshotProvider : IDisplaySnapshotProvider
     private const int DefaultRefreshRateHz = 60;
     private const double DefaultDpi = 96;
     private const int MaximumDisplayConfigAttempts = 5;
+    private const int MaximumSnapshotAttempts = 5;
 
     public IReadOnlyList<DisplaySnapshot> Read()
     {
-        Dictionary<string, DisplayPathDetails> paths = ReadActiveDisplayPaths();
-        List<DisplaySnapshot> snapshots = [];
-        DisplayNativeMethods.MonitorEnumProcedure callback = (
-            nint monitor,
-            nint monitorDeviceContext,
-            ref NativeRect monitorBounds,
-            nint data) =>
+        string? lastUnmatchedDisplay = null;
+        for (int attempt = 0; attempt < MaximumSnapshotAttempts; attempt++)
         {
-            _ = monitorDeviceContext;
-            _ = monitorBounds;
-            _ = data;
-            MonitorInfoEx monitorInfo = MonitorInfoEx.Create();
-            if (!DisplayNativeMethods.GetMonitorInfo(monitor, ref monitorInfo))
+            Dictionary<string, DisplayPathDetails> paths = ReadActiveDisplayPaths();
+            List<DisplaySnapshot> snapshots = [];
+            Exception? callbackFailure = null;
+            string? unmatchedDisplay = null;
+            DisplayNativeMethods.MonitorEnumProcedure callback = (
+                nint monitor,
+                nint monitorDeviceContext,
+                ref NativeRect monitorBounds,
+                nint data) =>
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetMonitorInfo failed.");
-            }
+                _ = monitorDeviceContext;
+                _ = monitorBounds;
+                _ = data;
+                try
+                {
+                    MonitorInfoEx monitorInfo = MonitorInfoEx.Create();
+                    if (!DisplayNativeMethods.GetMonitorInfo(monitor, ref monitorInfo))
+                    {
+                        callbackFailure = new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "GetMonitorInfo failed.");
+                        return false;
+                    }
 
-            string gdiName = monitorInfo.DeviceName.TrimEnd('\0');
-            if (!paths.TryGetValue(gdiName, out DisplayPathDetails? path))
+                    string gdiName = monitorInfo.DeviceName.TrimEnd('\0');
+                    if (!paths.TryGetValue(gdiName, out DisplayPathDetails? path))
+                    {
+                        unmatchedDisplay = gdiName;
+                        return false;
+                    }
+
+                    int width = checked(monitorInfo.Monitor.Right - monitorInfo.Monitor.Left);
+                    int height = checked(monitorInfo.Monitor.Bottom - monitorInfo.Monitor.Top);
+                    snapshots.Add(new DisplaySnapshot(
+                        path.DevicePath,
+                        new DisplayBounds(
+                            monitorInfo.Monitor.Left,
+                            monitorInfo.Monitor.Top,
+                            width,
+                            height),
+                        ReadScaleFactor(monitor),
+                        path.RefreshRateHz,
+                        (monitorInfo.Flags & DisplayNativeMethods.MonitorInfoPrimary) != 0));
+                    return true;
+                }
+                catch (Exception exception)
+                {
+                    // Exceptions must never cross the unmanaged EnumDisplayMonitors
+                    // callback boundary. Re-throw from managed code after enumeration.
+                    callbackFailure = exception;
+                    return false;
+                }
+            };
+
+            bool enumerated = DisplayNativeMethods.EnumDisplayMonitors(0, 0, callback, 0);
+            if (callbackFailure is not null)
             {
                 throw new InvalidOperationException(
-                    $"DisplayConfig did not provide a stable target path for '{gdiName}'.");
+                    "A monitor snapshot callback failed.",
+                    callbackFailure);
+            }
+            if (unmatchedDisplay is null)
+            {
+                if (!enumerated)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "EnumDisplayMonitors failed.");
+                }
+                return snapshots;
             }
 
-            int width = checked(monitorInfo.Monitor.Right - monitorInfo.Monitor.Left);
-            int height = checked(monitorInfo.Monitor.Bottom - monitorInfo.Monitor.Top);
-            snapshots.Add(new DisplaySnapshot(
-                path.DevicePath,
-                new DisplayBounds(
-                    monitorInfo.Monitor.Left,
-                    monitorInfo.Monitor.Top,
-                    width,
-                    height),
-                ReadScaleFactor(monitor),
-                path.RefreshRateHz,
-                (monitorInfo.Flags & DisplayNativeMethods.MonitorInfoPrimary) != 0));
-            return true;
-        };
-
-        if (!DisplayNativeMethods.EnumDisplayMonitors(0, 0, callback, 0))
-        {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "EnumDisplayMonitors failed.");
+            lastUnmatchedDisplay = unmatchedDisplay;
+            if (attempt + 1 < MaximumSnapshotAttempts)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(50 * (attempt + 1)));
+            }
         }
 
-        return snapshots;
+        throw new InvalidOperationException(
+            "DisplayConfig and EnumDisplayMonitors did not converge after " +
+            $"{MaximumSnapshotAttempts} attempts; the last unmatched monitor was " +
+            $"'{lastUnmatchedDisplay}'.");
     }
 
     private static Dictionary<string, DisplayPathDetails> ReadActiveDisplayPaths()

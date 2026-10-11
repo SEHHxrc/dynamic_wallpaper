@@ -48,6 +48,8 @@ internal sealed class RendererProtocolSession : IRendererSession
 
     public SessionId Id { get; }
 
+    internal int ProcessId => process.Id;
+
     public IAsyncEnumerable<RendererEvent> ReadEventsAsync(CancellationToken cancellationToken)
     {
         if (Interlocked.Exchange(ref readerClaimed, 1) != 0)
@@ -226,9 +228,13 @@ internal sealed class RendererProtocolSession : IRendererSession
         long generation;
         lock (stateGate)
         {
-            if (disposed || stateMachine.IsClosed || terminalPublished)
+            if (disposed || stateMachine.IsClosed)
             {
                 events.Writer.TryComplete();
+                return;
+            }
+            if (terminalPublished)
+            {
                 return;
             }
 
@@ -249,9 +255,13 @@ internal sealed class RendererProtocolSession : IRendererSession
         long generation;
         lock (stateGate)
         {
-            if (disposed || stateMachine.IsClosed || terminalPublished)
+            if (disposed || stateMachine.IsClosed)
             {
                 events.Writer.TryComplete();
+                return;
+            }
+            if (terminalPublished)
+            {
                 return;
             }
 

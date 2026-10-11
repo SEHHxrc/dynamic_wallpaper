@@ -6,7 +6,7 @@ Host 为每个 Renderer 会话创建仅当前用户可访问的 `LOCAL\` Named P
 
 Renderer 启动后先发带一次性认证密钥的 `Hello`，Host 以固定时间比较校验密钥、主版本和能力，再发 `Initialize`。握手未完成前除 `Shutdown` 外的控制命令均应拒绝；认证失败或握手超时直接关闭会话。
 
-Host 侧协议适配器只有在收到并验证 `Initialized` 后，才能把对应 `IRendererSession` 返回给 Application。Application 不发送或接收 `Hello`、`Initialize`、`Initialized` 等 wire 握手消息；这些细节由 Host 负责的 Application ↔ Contracts 适配层封装。首次加载顺序固定为 `AttachSurface → SurfaceAttached → LoadWallpaper → ContentLoaded → FirstFramePresented`；Explorer generation 恢复时，在内容仍驻留于同一 Renderer 的前提下，顺序为新的 `AttachSurface → SurfaceAttached → FirstFramePresented`。任何乱序、错误 session/generation 或超时都必须失败关闭，不能用最终出现的 `FirstFramePresented` 掩盖缺失的中间确认。
+Host 侧协议适配器只有在收到并验证 `Initialized` 后，才能把对应 `IRendererSession` 返回给 Application。Application 不发送或接收 `Hello`、`Initialize`、`Initialized` 等 wire 握手消息；这些细节由 Host 负责的 Application ↔ Contracts 适配层封装。首次加载顺序固定为 `AttachSurface → SurfaceAttached → LoadWallpaper → ContentLoaded → FirstFramePresented`。活动会话收到 `SetBounds` 后，必须先把既有已呈现帧适配到新的 child bounds（可以是短暂 DComp transform，也可以由 Renderer 重绘）并成功提交，再发送当前 Renderer generation 的 `FirstFramePresented`；Host 收到该确认后才能扩大活动容器。该过渡确认不替代新 provisional Renderer 的完整首帧门禁。Explorer generation 恢复时先完成上述 bounds 适配确认，再执行新的 `AttachSurface → SurfaceAttached → FirstFramePresented`。任何乱序、错误 session/generation 或超时都必须失败关闭，不能用最终出现的 `FirstFramePresented` 掩盖缺失的中间确认。
 
 ## Envelope
 
@@ -32,7 +32,7 @@ Host 侧协议适配器只有在收到并验证 `Initialized` 后，才能把对
 | `LoadWallpaper` | wallpaperId、kind、contentRoot、entryPoint、properties | `ContentLoaded`，随后 `FirstFramePresented` |
 | `Play/Pause/Suspend/Resume` | 空对象 | `PlaybackStateChanged` |
 | `Throttle` | framesPerSecond、quality | `PlaybackStateChanged` |
-| `SetBounds` | x、y、width、height、scaleFactor | 无强制确认 |
+| `SetBounds` | x、y、width、height、scaleFactor | 将既有已呈现帧适配到新 child bounds 并 Commit（或重绘/Present）后，发送当前 Renderer generation 的 `FirstFramePresented`；稳定新 Surface 仍需独立完整首帧 |
 | `SetFit` | fitMode | 无强制确认 |
 | `SetVolume` | volume `[0,1]`、muted | 无强制确认 |
 | `SetProperties` | 名称到受限 JSON 值 | 无强制确认 |

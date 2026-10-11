@@ -17,7 +17,8 @@ public sealed record SystemStateSnapshot(
     bool IsSessionDisconnected,
     bool IsRemoteSession,
     bool IsOnBattery,
-    bool HasFullscreenApplication);
+    bool HasFullscreenApplication,
+    bool IsSystemSuspended = false);
 
 public sealed record UserPlaybackPolicy
 {
@@ -85,6 +86,7 @@ public sealed record PlaybackDecision(
 public enum PlaybackDecisionReason
 {
     UserRequest,
+    SystemSuspended,
     DisplayOff,
     SessionLocked,
     SessionDisconnected,

@@ -21,7 +21,8 @@ public sealed record ProbeFaultPlan(
     int TargetIteration,
     int TargetSurfaceOrdinal,
     ProbeFaultPhase Phase,
-    ProbeFaultAction Action)
+    ProbeFaultAction Action,
+    int TargetOccurrence = 1)
 {
     public const string EnvironmentVariableName = "LIVEWALL_RENDERER_PROBE_FAULT";
 
@@ -32,6 +33,7 @@ public sealed record ProbeFaultPlan(
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(TargetIteration);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(TargetSurfaceOrdinal);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(TargetOccurrence);
         if (!Enum.IsDefined(Phase))
         {
             throw new ArgumentOutOfRangeException(nameof(Phase));

@@ -23,11 +23,27 @@ public sealed class RendererProtocolStateMachineTests
         machine.ValidateAndApply(new RendererContentLoaded(1));
         machine.ValidateAndApply(new RendererFirstFramePresented(1));
         machine.ValidateAndApply(new SetRendererBounds(2, Bounds, 1));
+        machine.ValidateAndApply(new RendererFirstFramePresented(1));
         machine.ValidateAndApply(new AttachRendererSurface(2, 43, Bounds, 1));
         machine.ValidateAndApply(new RendererSurfaceAttached(2));
         machine.ValidateAndApply(new RendererFirstFramePresented(2));
 
         machine.Generation.Should().Be(2);
+    }
+
+    [Fact]
+    public void BoundsResizeMustPresentBeforeAnotherAttachCanStart()
+    {
+        RendererProtocolStateMachine machine = CreateRunningMachine();
+        machine.ValidateAndApply(new SetRendererBounds(2, Bounds, 1));
+
+        Action prematureAttach = () => machine.ValidateAndApply(
+            new AttachRendererSurface(2, 43, Bounds, 1));
+
+        prematureAttach.Should().Throw<InvalidOperationException>()
+            .WithMessage("*AwaitingBoundsFirstFrame*");
+        machine.ValidateAndApply(new RendererFirstFramePresented(1));
+        machine.ValidateAndApply(new AttachRendererSurface(2, 43, Bounds, 1));
     }
 
     [Fact]

@@ -21,6 +21,11 @@ public sealed class DefaultPlaybackPolicyEvaluator : IPlaybackPolicyEvaluator
             return Inactive(PlaybackState.Stopped, PlaybackDecisionReason.UserRequest);
         }
 
+        if (system.IsSystemSuspended)
+        {
+            return Inactive(PlaybackState.Suspended, PlaybackDecisionReason.SystemSuspended);
+        }
+
         if (system.IsDisplayOff && policy.PauseWhenDisplayOff)
         {
             return Inactive(PlaybackState.Suspended, PlaybackDecisionReason.DisplayOff);

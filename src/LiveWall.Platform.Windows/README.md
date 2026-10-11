@@ -6,11 +6,11 @@
 
 ## 对外接口
 
-实现 `LiveWall.Application` 中的 `IDesktopHost`、`IDisplayTopologySource` 和 `IProcessSupervisor`；`IDesktopHostAdapter` 与 `DesktopAttachmentLease` 是本程序集内部机制。对外只返回 Application/Domain 模型和不含 Shell 句柄的 attachment capability，不暴露 COM 对象或裸原生资源所有权。
+实现 `LiveWall.Application` 中的 `IDesktopHost`、`IDisplayTopologySource`、`ISystemStateSource` 和 `IProcessSupervisor`；`IDesktopHostAdapter` 与 `DesktopAttachmentLease` 是本程序集内部机制。对外只返回 Application/Domain 模型和不含 Shell 句柄的 attachment capability，不暴露 COM 对象或裸原生资源所有权。
 
-`IDesktopHost` 已提供批量 `ReplaceSurfacesAsync`，`CreateSurfaceAsync` 已按约定只创建隐藏 provisional Surface。端口与线程机制已有自动化覆盖，但尚未通过真实 Windows Shell 兼容矩阵；以 `docs/windows-desktop-host.md`、`docs/implementation-status.md`、ADR-007 和 ADR-008 为边界。
+`IDesktopHost` 已提供批量 `ReplaceSurfacesAsync`，`CreateSurfaceAsync` 已按约定只创建隐藏 provisional Surface；`ResizeSurfaceAsync` 在显示几何过渡期间调整既有活动容器，Renderer v1 `SetBounds` 同步驱动 child/swap-chain resize。端口与线程机制已有自动化覆盖，但尚未通过真实 Windows Shell 兼容矩阵；以 `docs/windows-desktop-host.md`、`docs/implementation-status.md`、ADR-007 和 ADR-008 为边界。
 
-Shell 兼容诊断已采集完整 build/UBR 和递归窗口结构；生产适配器只允许使用完整 build 键并在每次发现时重新验证结构与 presentation kind，基础 build 号、一次采样的裸 HWND 或 `StructurallyValidated` 结果都不能作为放行依据。`26200.9168` 的两种 GDI 路径不可见；无边框 Host-owned DComp、独立 Renderer-child v1 binding 和跨 Explorer generation 功能恢复已通过。内部 Lease/Factory 与正式 Renderer v1 产品候选入口已接线；交互式主屏单 Surface 首帧已连续两次通过，但首次冷启动超时、物理单屏和双屏覆盖仍待复测。两类生产 allowlist 继续为空，Shell mutation 和剩余显示矩阵未完成。
+Shell 兼容诊断已采集完整 build/UBR 和递归窗口结构；生产适配器只允许使用完整 build 键并在每次发现时重新验证结构与 presentation kind。无边框 Host-owned DComp、Renderer-child v1 binding、Explorer generation、P1.6/P1.7 与 P1.8 显示拓扑代表矩阵已经通过。Raised lease 坐标门禁及活动 Host/Renderer 快速 resize 把适配缩短到约 14–34 ms；TG0 证明 DWM 不保证预测区域原子揭示，Guard 不生产化，旋转/扩张保留 `TransientCoverageGap`。Native display snapshot 会重采样暂态不一致，运行期空集合需相隔 350 ms 的连续两次确认。Span 使用物理像素 union、单 Renderer/Surface，position、scale、成员 `2→1→2` 和 `PerDisplay→Span` 实机通过；自有 HWND 使用精确生命周期注册，未削弱第三方竞争检测。P1.9.2 的 WTS/Power 聚合与验证后恢复已通过自动门禁，实机仍待验收。两类生产 allowlist 继续为空；RDP/用户切换、并发恢复和 Shell mutation 矩阵仍未完成。
 
 ## 依赖规则
 

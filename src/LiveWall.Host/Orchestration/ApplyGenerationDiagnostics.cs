@@ -58,6 +58,7 @@ public enum ApplyFailureReason
     FirstFrameTimeout,
     FirstFrameRejected,
     ReplaceFailed,
+    ShutdownFailed,
     CleanupFailed,
     Cancelled,
     Unexpected,
@@ -117,6 +118,7 @@ internal sealed class ApplyGenerationOperation : IDisposable
     private readonly Lock gate = new();
     private readonly long startedTimestamp = Stopwatch.GetTimestamp();
     private readonly ApplyDeadlineLease deadline;
+    private readonly CancellationTokenSource preparationCancellation = new();
     private readonly List<ApplyTimelineEntry> timeline = [];
     private readonly TaskCompletionSource<ApplyGenerationResult> completion =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -142,6 +144,8 @@ internal sealed class ApplyGenerationOperation : IDisposable
     public Task<ApplyGenerationResult> Completion => completion.Task;
 
     public CancellationToken DeadlineToken => deadline.Token;
+
+    public CancellationToken PreparationCancellationToken => preparationCancellation.Token;
 
     internal bool IsDeadlineDisposed => deadline.IsDisposed;
 
@@ -210,7 +214,13 @@ internal sealed class ApplyGenerationOperation : IDisposable
         ApplyGenerationTerminalState state = ApplyGenerationTerminalState.Failed) =>
         Complete(state, phase, reason, detail);
 
-    public void Dispose() => deadline.Dispose();
+    public void CancelPreparation() => preparationCancellation.Cancel();
+
+    public void Dispose()
+    {
+        deadline.Dispose();
+        preparationCancellation.Dispose();
+    }
 
     private void Complete(
         ApplyGenerationTerminalState state,

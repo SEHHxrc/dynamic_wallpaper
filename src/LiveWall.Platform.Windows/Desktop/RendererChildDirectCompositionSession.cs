@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using LiveWall.Platform.Windows.NativeMethods;
 using Vortice.Direct3D;
@@ -31,6 +32,9 @@ public sealed class RendererChildDirectCompositionSession : IAsyncDisposable
     private IDCompositionDevice? compositionDevice;
     private IDCompositionTarget? compositionTarget;
     private IDCompositionVisual? compositionVisual;
+    private uint? lastPresentedColor;
+    private int presentationWidth;
+    private int presentationHeight;
 
     private RendererChildDirectCompositionSession() => windowProcedure = WindowProcedure;
 
@@ -67,6 +71,17 @@ public sealed class RendererChildDirectCompositionSession : IAsyncDisposable
         ObjectDisposedException.ThrowIf(disposed, this);
         await dispatcher.InvokeAsync(
                 () => PresentOnDispatcher(colorReference),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task ResizeAsync(int width, int height, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
+        ObjectDisposedException.ThrowIf(disposed, this);
+        await dispatcher.InvokeAsync(
+                () => ResizeOnDispatcher(width, height),
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -146,6 +161,8 @@ public sealed class RendererChildDirectCompositionSession : IAsyncDisposable
         compositionVisual!.SetContent(swapChain).CheckError();
         compositionTarget!.SetRoot(compositionVisual).CheckError();
         compositionDevice.Commit().CheckError();
+        presentationWidth = width;
+        presentationHeight = height;
     }
 
     private void PresentOnDispatcher(uint colorReference)
@@ -169,6 +186,45 @@ public sealed class RendererChildDirectCompositionSession : IAsyncDisposable
         {
             throw new InvalidOperationException($"DwmFlush failed (HRESULT=0x{flushResult:X8}).");
         }
+        lastPresentedColor = colorReference;
+    }
+
+    private void ResizeOnDispatcher(int width, int height)
+    {
+        if (childWindow == 0 || compositionVisual is null || compositionDevice is null ||
+            presentationWidth <= 0 || presentationHeight <= 0)
+        {
+            throw new InvalidOperationException("Renderer DirectComposition resources are not ready.");
+        }
+
+        // This Surface is already visible and will shortly be replaced by a correctly-sized
+        // provisional Renderer. Keep its last composed frame alive and stretch it to the new
+        // desktop bounds instead of synchronously tearing down a large swap-chain back buffer.
+        // The temporary quality trade-off prevents the Shell wallpaper from being exposed while
+        // display topology is transitioning.
+        Matrix3x2 stretch = Matrix3x2.CreateScale(
+            (float)width / presentationWidth,
+            (float)height / presentationHeight);
+        compositionVisual.SetTransform(stretch).CheckError();
+        if (!DesktopNativeMethods.SetWindowPos(
+                childWindow,
+                DesktopNativeMethods.WindowTop,
+                0,
+                0,
+                width,
+                height,
+                DesktopNativeMethods.SetWindowPositionNoActivate |
+                    DesktopNativeMethods.SetWindowPositionShowWindow))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Renderer child resize failed.");
+        }
+
+        compositionDevice.Commit().CheckError();
+        // Do not synchronously wait for DWM while Windows is changing display mode. On real
+        // hardware DwmFlush can block for most of a second, leaving the resized desktop exposed
+        // before the Host container can follow. This acknowledgement means that the stretch and
+        // child bounds were accepted into the DComp commit queue. Initial/replacement first-frame
+        // validation still uses Present + Commit + DwmFlush in PresentOnDispatcher.
     }
 
     private void CleanupOnDispatcher()

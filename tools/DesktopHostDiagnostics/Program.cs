@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using LiveWall.Application.Sessions;
@@ -6,6 +7,7 @@ using LiveWall.Contracts.RendererProtocol;
 using LiveWall.Diagnostics;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
+using LiveWall.Domain.Sessions;
 using LiveWall.Host.Orchestration;
 using LiveWall.Infrastructure.Ipc;
 using LiveWall.Platform.Windows.Desktop;
@@ -50,7 +52,17 @@ internal static class Program
             if (options.RaisedDesktopProbeEnabled || options.PresentationKind is not null ||
                 options.ExplorerRecoveryProbeEnabled || options.RendererChildProbeEnabled ||
                 options.RendererChildRecoveryProbeEnabled || options.ProductCandidateEnabled ||
-                options.ProductCandidateLoopEnabled || options.ProductCandidateFaultEnabled)
+                options.ProductCandidateLoopEnabled || options.ProductCandidateFaultEnabled ||
+                options.ProductCandidateReplacementFaultEnabled ||
+                options.ProductCandidateRetirementFaultEnabled ||
+                options.ProductCandidateRecoveryEnabled ||
+                options.ProductCandidateTopologyEnabled ||
+                options.ProductCandidateTopologyChurnEnabled ||
+                options.HostTaskbarNoopEnabled ||
+                options.HostExplorerEventRecoveryEnabled ||
+                options.HostSessionLockEnabled ||
+                options.HostSleepResumeEnabled ||
+                options.TransitionGuardProbeEnabled)
             {
                 return await RunRaisedDesktopDiagnosticAsync(
                         topology,
@@ -359,6 +371,111 @@ internal static class Program
                     .ConfigureAwait(false);
             }
 
+            if (options.ProductCandidateReplacementFaultEnabled)
+            {
+                return await RunProductCandidateReplacementFaultAsync(
+                        topology,
+                        options.DurationSeconds,
+                        options.TargetDisplay,
+                        options.FaultPlan ?? throw new InvalidOperationException(
+                            "Replacement fault mode requires a fault plan."),
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            if (options.ProductCandidateRetirementFaultEnabled)
+            {
+                return await RunProductCandidateRetirementFaultAsync(
+                        topology,
+                        options.DurationSeconds,
+                        options.TargetDisplay,
+                        options.FaultPlan ?? throw new InvalidOperationException(
+                            "Retirement fault mode requires a fault plan."),
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            if (options.ProductCandidateRecoveryEnabled)
+            {
+                return await RunProductCandidateRecoveryAsync(
+                        topology,
+                        options.DurationSeconds,
+                        options.TargetDisplay,
+                        options.FaultPlan,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            if (options.HostTaskbarNoopEnabled)
+            {
+                return await RunHostTaskbarNoopAsync(
+                        topology,
+                        options.DurationSeconds,
+                        options.TargetDisplay,
+                        options.SignalCount,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            if (options.HostExplorerEventRecoveryEnabled)
+            {
+                return await RunHostExplorerEventRecoveryAsync(
+                        topology,
+                        options.DurationSeconds,
+                        options.TargetDisplay,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            if (options.HostSessionLockEnabled || options.HostSleepResumeEnabled)
+            {
+                return await RunHostSystemTransitionAsync(
+                        topology,
+                        options.DurationSeconds,
+                        options.TargetDisplay,
+                        options.HostSessionLockEnabled
+                            ? WindowsHostSystemTransitionKind.SessionLock
+                            : WindowsHostSystemTransitionKind.SleepResume,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            if (options.ProductCandidateTopologyEnabled)
+            {
+                return await RunProductCandidateTopologyAsync(
+                        topology,
+                        options.DurationSeconds,
+                        options.TopologyChanges,
+                        transitionGuardProbe: false,
+                        options.TargetDisplay,
+                        options.LayoutMode,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            if (options.TransitionGuardProbeEnabled)
+            {
+                return await RunProductCandidateTopologyAsync(
+                        topology,
+                        options.DurationSeconds,
+                        topologyChanges: 1,
+                        transitionGuardProbe: true,
+                        options.TargetDisplay,
+                        LayoutMode.PerDisplay,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            if (options.ProductCandidateTopologyChurnEnabled)
+            {
+                return await RunProductCandidateTopologyChurnAsync(
+                        topology,
+                        options.DurationSeconds,
+                        options.TopologyChanges,
+                        cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
             if (options.ProductCandidateLoopEnabled)
             {
                 return await RunProductCandidateLoopAsync(
@@ -366,6 +483,7 @@ internal static class Program
                         options.DurationSeconds,
                         options.Iterations,
                         options.TargetDisplay,
+                        options.LayoutSequence,
                         cancellation.Token)
                     .ConfigureAwait(false);
             }
@@ -543,6 +661,888 @@ internal static class Program
             ? 0
             : ExplorerRecoveryFailedExitCode;
     }
+
+    private static async Task<int> RunProductCandidateRecoveryAsync(
+        DisplayTopology topology,
+        int durationSeconds,
+        string targetDisplay,
+        ProbeFaultPlan? faultPlan,
+        CancellationToken cancellationToken)
+    {
+        ProductCandidateDisplaySelection selection =
+            ParseProductCandidateDisplaySelection(targetDisplay);
+        IReadOnlyList<DisplayId> selectedDisplays =
+            RendererProductCandidateDiagnostics.ResolveDisplayIds(topology, selection);
+        if (selectedDisplays.Count < 2)
+        {
+            throw new InvalidOperationException(
+                "Dual-display product recovery requires at least two selected displays.");
+        }
+
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Product recovery snapshot: Before ===");
+        PrintShellTopology(before);
+        WindowsBuildIdentity build = WindowsShellTopologyDiagnostics.CaptureBuildIdentity();
+        ShellTopologySnapshot? oldActive = null;
+        ShellTopologySnapshot? newShell = null;
+        RendererProductCandidateRecoveryResult result =
+            await RendererProductCandidateDiagnostics.RunRecoveryAsync(
+                    new RendererProductCandidateRecoveryRequest(
+                        FindRendererChildExecutable(),
+                        new WindowsShellSnapshot(
+                            build.Version,
+                            build.Build,
+                            RaisedDesktopEnabled: true,
+                            build.UpdateBuildRevision),
+                        topology,
+                        TimeSpan.FromSeconds(durationSeconds),
+                        TimeSpan.FromSeconds(durationSeconds),
+                        async token =>
+                        {
+                            oldActive = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+                            ShellWindowFingerprint oldProgman = FindProgman(oldActive);
+                            Console.WriteLine(
+                                $"EXPLICIT PRODUCT EXPLORER RESTART: stopping Shell PID " +
+                                $"{oldProgman.ProcessId}; oldShell=0x{oldActive.ShellWindowHandle:X}.");
+                            await RestartExplorerAsync(oldProgman.ProcessId, token)
+                                .ConfigureAwait(false);
+                            newShell = await WaitForNewShellGenerationAsync(
+                                    oldActive.ShellWindowHandle,
+                                    oldProgman.ProcessId,
+                                    token)
+                                .ConfigureAwait(false);
+                        },
+                        selection,
+                        faultPlan is null
+                            ? null
+                            : new DiagnosticRendererEnvironmentTarget(
+                                faultPlan.TargetIteration,
+                                faultPlan.TargetSurfaceOrdinal,
+                                new Dictionary<string, string>
+                                {
+                                    [ProbeFaultPlan.EnvironmentVariableName] =
+                                        faultPlan.Serialize(),
+                                }),
+                        faultPlan is null
+                            ? DesktopRecoveryCompletionMode.Reattached
+                            : DesktopRecoveryCompletionMode.Rebuilt,
+                        faultPlan is null ? null : TimeSpan.FromSeconds(3)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Product recovery snapshot: After cleanup ===");
+        PrintShellTopology(after);
+        Dictionary<SessionId, ProductCandidateSessionResult> initial =
+            result.Initial.Sessions.ToDictionary(item => item.SessionId);
+        bool sameRendererProcesses = result.RecoveredSessions.All(item =>
+        {
+            if (!initial.TryGetValue(item.SessionId, out ProductCandidateSessionResult? previous))
+            {
+                return false;
+            }
+            return previous.RendererProcessId is not null &&
+                previous.RendererProcessId == item.RendererProcessId;
+        });
+        bool generationChanged = oldActive is not null && newShell is not null &&
+            oldActive.ShellWindowHandle != newShell.ShellWindowHandle &&
+            FindProgman(oldActive).ProcessId != FindProgman(newShell).ProcessId;
+        bool reattachedTimelineComplete = result.Recovery.Timeline.Count(entry =>
+                    entry.Phase == DesktopRecoveryPhase.SurfaceAttached &&
+                    entry.Outcome == ApplyStageOutcome.Success) == selectedDisplays.Count &&
+                result.Recovery.Timeline.Count(entry =>
+                    entry.Phase == DesktopRecoveryPhase.FirstFramePresented &&
+                    entry.Outcome == ApplyStageOutcome.Success) == selectedDisplays.Count;
+        bool rebuiltTimelineComplete = result.Recovery.Timeline.Any(entry =>
+                entry.Phase == DesktopRecoveryPhase.BatchAbandoned) &&
+            result.Recovery.Timeline.Any(entry =>
+                entry.Phase == DesktopRecoveryPhase.RebuildScheduled) &&
+            result.Recovery.Timeline.Any(entry =>
+                entry.Phase == DesktopRecoveryPhase.RebuildStarted);
+        bool timelineComplete = result.Recovery.Timeline.Count(entry =>
+                entry.Phase == DesktopRecoveryPhase.SurfacesReplaced &&
+                entry.Outcome == ApplyStageOutcome.Success) == 1 &&
+            (result.Recovery.CompletionMode == DesktopRecoveryCompletionMode.Reattached
+                ? reattachedTimelineComplete
+                : rebuiltTimelineComplete);
+        bool ownedWindowsRemain = after.ShellDescendants.Any(window =>
+            window.ClassName.StartsWith(
+                RaisedDesktopHostSurfaceLease.WindowClassPrefix,
+                StringComparison.Ordinal) ||
+            window.ClassName.StartsWith(
+                RendererChildDirectCompositionSession.WindowClassPrefix,
+                StringComparison.Ordinal));
+        DesktopRecoveryCompletionMode expectedMode = faultPlan is null
+            ? DesktopRecoveryCompletionMode.Reattached
+            : DesktopRecoveryCompletionMode.Rebuilt;
+        bool rendererIdentityValid = expectedMode == DesktopRecoveryCompletionMode.Reattached
+            ? sameRendererProcesses
+            : result.RecoveredSessions.All(item => !initial.ContainsKey(item.SessionId));
+        bool valid = generationChanged &&
+            result.Recovery.TerminalState == DesktopRecoveryTerminalState.Succeeded &&
+            result.Recovery.CompletionMode == expectedMode &&
+            rendererIdentityValid && timelineComplete &&
+            result.FinalRetirement.Graceful &&
+            result.FinalRetirement.OwnedResourcesCleaned &&
+            !ownedWindowsRemain;
+        Console.WriteLine(
+            $"Product recovery result: valid={valid} | terminal={result.Recovery.TerminalState} | " +
+            $"mode={result.Recovery.CompletionMode} | shellGenerationChanged={generationChanged} | " +
+            $"rendererIdentityValid={rendererIdentityValid} | " +
+            $"sameRendererProcesses={sameRendererProcesses} | timelineComplete={timelineComplete} | " +
+            $"finalGraceful={result.FinalRetirement.Graceful} | " +
+            $"ownedWindowsRemain={ownedWindowsRemain}.");
+        foreach (DesktopRecoveryTimelineEntry entry in result.Recovery.Timeline)
+        {
+            Console.WriteLine(
+                $"recovery={entry.RecoveryId} | generation={entry.HostGeneration} | " +
+                $"attempt={entry.Attempt} | surface={entry.SurfaceOrdinal} | " +
+                $"phase={entry.Phase} | outcome={entry.Outcome} | " +
+                $"reason={entry.FailureReason} | elapsedMs={entry.Elapsed.TotalMilliseconds:0.###}");
+        }
+        return valid ? 0 : ExplorerRecoveryFailedExitCode;
+    }
+
+    private static async Task<int> RunHostTaskbarNoopAsync(
+        DisplayTopology topology,
+        int durationSeconds,
+        string targetDisplay,
+        int signalCount,
+        CancellationToken cancellationToken)
+    {
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Host TaskbarCreated No-op snapshot: Before ===");
+        PrintShellTopology(before);
+        ProductCandidateDisplaySelection selection =
+            ParseProductCandidateDisplaySelection(targetDisplay);
+        TimeSpan observation = TimeSpan.FromSeconds(Math.Max(durationSeconds, 3));
+        WindowsHostTaskbarNoopResult result =
+            await WindowsHostEventChainDiagnostics.RunTaskbarNoopAsync(
+                    new WindowsHostTaskbarNoopRequest(
+                        FindRendererChildExecutable(),
+                        topology,
+                        selection,
+                        signalCount,
+                        observation),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Host TaskbarCreated No-op snapshot: After cleanup ===");
+        PrintShellTopology(after);
+        bool ownedWindowsRemain = HasLiveWallOwnedWindows(after);
+        int addedWorkerCount = DirectShellWorkers(after)
+            .Except(DirectShellWorkers(before))
+            .Count();
+        bool valid = result.RawTaskbarSignals == signalCount &&
+            result.ValidatedShellChanges == 0 &&
+            result.ForwardedRecoveryCommands == 0 &&
+            result.RecoveryOperationsAdded == 0 &&
+            result.InitialGeneration == result.FinalGeneration &&
+            result.BatchReplaceCount == 0 &&
+            result.RetirementCount == 0 &&
+            result.SessionIdentityPreserved &&
+            result.OwnedResourcesCleaned &&
+            !ownedWindowsRemain &&
+            addedWorkerCount == 0;
+        Console.WriteLine(
+            $"HOST_TASKBAR_NOOP valid={valid} | rawTaskbarSignals={result.RawTaskbarSignals} | " +
+            $"validatedShellChanges={result.ValidatedShellChanges} | " +
+            $"forwardedRecoveryCommands={result.ForwardedRecoveryCommands} | " +
+            $"recoveryOperationsAdded={result.RecoveryOperationsAdded} | " +
+            $"generation={result.InitialGeneration}->{result.FinalGeneration} | " +
+            $"batchReplaceCount={result.BatchReplaceCount} | " +
+            $"retirementCount={result.RetirementCount} | " +
+            $"sessionIdentityPreserved={result.SessionIdentityPreserved} | " +
+            $"ownedWindowsRemain={ownedWindowsRemain} | addedWorkerCount={addedWorkerCount}.");
+        return valid ? 0 : ExplorerRecoveryFailedExitCode;
+    }
+
+    private static async Task<int> RunHostExplorerEventRecoveryAsync(
+        DisplayTopology topology,
+        int durationSeconds,
+        string targetDisplay,
+        CancellationToken cancellationToken)
+    {
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Host Explorer event-chain snapshot: Before ===");
+        PrintShellTopology(before);
+        ProductCandidateDisplaySelection selection =
+            ParseProductCandidateDisplaySelection(targetDisplay);
+        ShellTopologySnapshot? oldActive = null;
+        ShellTopologySnapshot? newShell = null;
+        WindowsHostExplorerEventRecoveryResult result =
+            await WindowsHostEventChainDiagnostics.RunExplorerRecoveryAsync(
+                    new WindowsHostExplorerEventRecoveryRequest(
+                        FindRendererChildExecutable(),
+                        topology,
+                        selection,
+                        TimeSpan.FromSeconds(durationSeconds),
+                        async token =>
+                        {
+                            oldActive = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+                            ShellWindowFingerprint oldProgman = FindProgman(oldActive);
+                            Console.WriteLine(
+                                $"EXPLICIT HOST EVENT-CHAIN EXPLORER RESTART: stopping Shell " +
+                                $"PID {oldProgman.ProcessId}; oldShell=0x" +
+                                $"{oldActive.ShellWindowHandle:X}. No recovery command will be " +
+                                "sent directly.");
+                            await RestartExplorerAsync(oldProgman.ProcessId, token)
+                                .ConfigureAwait(false);
+                            newShell = await WaitForNewShellGenerationAsync(
+                                    oldActive.ShellWindowHandle,
+                                    oldProgman.ProcessId,
+                                    token)
+                                .ConfigureAwait(false);
+                        }),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Host Explorer event-chain snapshot: After cleanup ===");
+        PrintShellTopology(after);
+        bool shellGenerationChanged = oldActive is not null && newShell is not null &&
+            oldActive.ShellWindowHandle != newShell.ShellWindowHandle &&
+            FindProgman(oldActive).ProcessId != FindProgman(newShell).ProcessId;
+        bool ownedWindowsRemain = HasLiveWallOwnedWindows(after);
+        bool successfulMode = result.Recovery.TerminalState ==
+                DesktopRecoveryTerminalState.Succeeded &&
+            result.Recovery.CompletionMode is
+                DesktopRecoveryCompletionMode.Reattached or
+                DesktopRecoveryCompletionMode.Rebuilt;
+        bool identityValid = result.Recovery.CompletionMode ==
+                DesktopRecoveryCompletionMode.Reattached
+            ? result.SessionIdentityPreserved
+            : !result.SessionIdentityPreserved;
+        bool valid = shellGenerationChanged && successfulMode && identityValid &&
+            result.ValidatedShellChanges == 1 &&
+            result.ForwardedRecoveryCommands == 1 &&
+            result.RecoveryOperationsAdded == 1 &&
+            result.DuplicateRecoveryCount == 0 &&
+            result.BatchReplaceCount == 1 &&
+            result.OwnedResourcesCleaned &&
+            !ownedWindowsRemain;
+        Console.WriteLine(
+            $"HOST_EXPLORER_EVENT_RECOVERY valid={valid} | " +
+            $"rawTaskbarSignals={result.RawTaskbarSignals} | " +
+            $"validatedShellChanges={result.ValidatedShellChanges} | " +
+            $"forwardedRecoveryCommands={result.ForwardedRecoveryCommands} | " +
+            $"recoveryOperationsAdded={result.RecoveryOperationsAdded} | " +
+            $"duplicateRecoveryCount={result.DuplicateRecoveryCount} | " +
+            $"terminal={result.Recovery.TerminalState} | " +
+            $"mode={result.Recovery.CompletionMode} | " +
+            $"batchReplaceCount={result.BatchReplaceCount} | " +
+            $"sessionIdentityPreserved={result.SessionIdentityPreserved} | " +
+            $"shellGenerationChanged={shellGenerationChanged} | " +
+            $"ownedWindowsRemain={ownedWindowsRemain}.");
+        return valid ? 0 : ExplorerRecoveryFailedExitCode;
+    }
+
+    private static async Task<int> RunHostSystemTransitionAsync(
+        DisplayTopology topology,
+        int durationSeconds,
+        string targetDisplay,
+        WindowsHostSystemTransitionKind transitionKind,
+        CancellationToken cancellationToken)
+    {
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine($"=== Host {transitionKind} snapshot: Before ===");
+        PrintShellTopology(before);
+        ProductCandidateDisplaySelection selection =
+            ParseProductCandidateDisplaySelection(targetDisplay);
+        WindowsHostSystemTransitionResult result =
+            await WindowsHostEventChainDiagnostics.RunSystemTransitionAsync(
+                    new WindowsHostSystemTransitionRequest(
+                        FindRendererChildExecutable(),
+                        topology,
+                        selection,
+                        transitionKind,
+                        TimeSpan.FromMinutes(3),
+                        TimeSpan.FromSeconds(durationSeconds),
+                        () => Console.WriteLine(transitionKind ==
+                                WindowsHostSystemTransitionKind.SessionLock
+                            ? "SYSTEM_TRANSITION_ARMED: lock Windows now, then unlock and " +
+                                "return within three minutes. LiveWall will not lock it for you."
+                            : "SYSTEM_TRANSITION_ARMED: put Windows to sleep now, then wake " +
+                                "and sign in within three minutes. LiveWall will not initiate sleep.")),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine($"=== Host {transitionKind} snapshot: After cleanup ===");
+        PrintShellTopology(after);
+        bool ownedWindowsRemain = HasLiveWallOwnedWindows(after);
+        bool timelineValid = result.SystemStateTimeline.Any(change =>
+                change.RequiresEnvironmentValidation) &&
+            result.SystemStateTimeline[^1].RequiresEnvironmentValidation == false;
+        bool valid = result.SuspendedObserved && result.ResumedObserved &&
+            result.InitialGeneration == result.FinalGeneration &&
+            result.InitialReplaceCount == result.FinalReplaceCount &&
+            result.InitialRetirementCount == result.FinalRetirementCount &&
+            result.SessionIdentityPreserved && timelineValid &&
+            result.OwnedResourcesCleaned && !ownedWindowsRemain;
+        Console.WriteLine(
+            $"HOST_SYSTEM_TRANSITION valid={valid} | kind={transitionKind} | " +
+            $"suspendedObserved={result.SuspendedObserved} | " +
+            $"resumedObserved={result.ResumedObserved} | " +
+            $"generation={result.InitialGeneration}->{result.FinalGeneration} | " +
+            $"replace={result.InitialReplaceCount}->{result.FinalReplaceCount} | " +
+            $"retirement={result.InitialRetirementCount}->{result.FinalRetirementCount} | " +
+            $"sessionIdentityPreserved={result.SessionIdentityPreserved} | " +
+            $"ownedWindowsRemain={ownedWindowsRemain}.");
+        foreach (LiveWall.Application.Policies.SystemStateChange change in
+                 result.SystemStateTimeline)
+        {
+            Console.WriteLine(
+                $"systemRevision={change.Revision} | reason={change.Reason} | " +
+                $"validationRequired={change.RequiresEnvironmentValidation} | " +
+                $"locked={change.Snapshot.IsSessionLocked} | " +
+                $"displayOff={change.Snapshot.IsDisplayOff} | " +
+                $"suspended={change.Snapshot.IsSystemSuspended} | " +
+                $"disconnected={change.Snapshot.IsSessionDisconnected}.");
+        }
+        return valid ? 0 : ExplorerRecoveryFailedExitCode;
+    }
+
+    private static async Task<int> RunProductCandidateTopologyAsync(
+        DisplayTopology topology,
+        int durationSeconds,
+        int topologyChanges,
+        bool transitionGuardProbe,
+        string targetDisplay,
+        LayoutMode layoutMode,
+        CancellationToken cancellationToken)
+    {
+        if (!transitionGuardProbe && topology.Displays.Count < 2)
+        {
+            throw new InvalidOperationException(
+                "The initial topology test requires at least two connected displays.");
+        }
+
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Product topology snapshot: Before ===");
+        PrintShellTopology(before);
+        WindowsBuildIdentity build = WindowsShellTopologyDiagnostics.CaptureBuildIdentity();
+        using WindowsDisplayTopologySource topologySource = new();
+        DisplayTopology observedBaseline = topologySource.Current;
+        RendererProductCandidateTransitionGuardRequest? guardRequest = null;
+        if (transitionGuardProbe)
+        {
+            ProductCandidateDisplaySelection selection =
+                ParseProductCandidateDisplaySelection(targetDisplay);
+            IReadOnlyList<DisplayId> targets =
+                RendererProductCandidateDiagnostics.ResolveDisplayIds(observedBaseline, selection);
+            if (targets.Count != 1)
+            {
+                throw new ArgumentException(
+                    "Transition guard diagnostics require exactly one target display.");
+            }
+            guardRequest = new RendererProductCandidateTransitionGuardRequest(
+                targets[0],
+                TestColors[0],
+                result =>
+                {
+                    string regions = string.Join(
+                        ";",
+                        result.Plan.GuardRegions.Select(FormatBounds));
+                    Console.WriteLine(
+                        $"GUARD_{result.State.ToString().ToUpperInvariant()} | " +
+                        $"target={result.Plan.TargetDisplayId} | " +
+                        $"current={FormatBounds(result.Plan.CurrentBounds)} | " +
+                        $"candidate={FormatBounds(result.Plan.CandidateBounds)} | " +
+                        $"regions={regions} | area={result.Plan.TotalPixelArea} | " +
+                        $"adjacentIntersection={result.Plan.AdjacentDisplayIntersection} | " +
+                        $"postArmWindowMutations={result.PostArmWindowMutationCount} | " +
+                        $"shellGenerationUnchanged={result.ShellGenerationUnchanged} | " +
+                        $"targetReachedCandidate={result.TargetReachedCandidateBounds} | " +
+                        $"ownedWindowsRemain={result.OwnedWindowsRemain}.");
+                });
+        }
+        Console.WriteLine($"Product topology layout: {layoutMode}.");
+        RendererProductCandidateTopologyResult result =
+            await RendererProductCandidateDiagnostics.RunTopologyAsync(
+                    new RendererProductCandidateTopologyRequest(
+                        FindRendererChildExecutable(),
+                        new WindowsShellSnapshot(
+                            build.Version,
+                            build.Build,
+                            RaisedDesktopEnabled: true,
+                            build.UpdateBuildRevision),
+                        observedBaseline,
+                        topologyChanges,
+                        TimeSpan.FromSeconds(durationSeconds),
+                        async (index, current, token) =>
+                        {
+                            Console.WriteLine(
+                                $"TOPOLOGY_CHANGE_READY index={index} | " +
+                                $"currentRevision={current.Revision} | " +
+                                $"displays={current.Displays.Count}. " +
+                                "Perform the explicitly approved physical display change now; " +
+                                "the test color remains active while this tool waits up to 10 minutes.");
+                            DateTime deadline = DateTime.UtcNow.AddMinutes(10);
+                            while (DateTime.UtcNow < deadline)
+                            {
+                                token.ThrowIfCancellationRequested();
+                                DisplayTopology observed;
+                                try
+                                {
+                                    observed = topologySource.Refresh();
+                                }
+                                catch (InvalidOperationException exception)
+                                {
+                                    Console.WriteLine(
+                                        $"TOPOLOGY_SNAPSHOT_TRANSIENT index={index} | " +
+                                        $"detail={exception.Message}");
+                                    await Task.Delay(TimeSpan.FromMilliseconds(350), token)
+                                        .ConfigureAwait(false);
+                                    continue;
+                                }
+                                if (!SameDisplayTopology(observedBaseline, observed))
+                                {
+                                    await Task.Delay(TimeSpan.FromMilliseconds(500), token)
+                                        .ConfigureAwait(false);
+                                    DisplayTopology stable = topologySource.Refresh();
+                                    if (!SameDisplayTopology(observed, stable))
+                                    {
+                                        continue;
+                                    }
+                                    Console.WriteLine(
+                                        $"TOPOLOGY_CHANGE_OBSERVED index={index} | " +
+                                        $"displays={observedBaseline.Displays.Count}->{stable.Displays.Count} | " +
+                                        $"before={FormatDisplaySummary(observedBaseline)} | " +
+                                        $"after={FormatDisplaySummary(stable)}.");
+                                    observedBaseline = stable;
+                                    // The source has its own local revision. Host reconciliation only
+                                    // requires a strict monotonic revision within this diagnostic run.
+                                    return stable with { Revision = checked(current.Revision + 1) };
+                                }
+                                await Task.Delay(TimeSpan.FromMilliseconds(250), token)
+                                    .ConfigureAwait(false);
+                            }
+                            throw new TimeoutException(
+                                $"No physical display topology change was observed for step {index} " +
+                                "within 10 minutes.");
+                        },
+                        ProductCandidateDisplaySelection.All,
+                        VerifyTopologyStableAsync: (expected, duration, token) =>
+                            VerifyTopologyStableAsync(
+                                topologySource,
+                                expected,
+                                duration,
+                                token),
+                        TransitionGuard: guardRequest,
+                        LayoutMode: layoutMode),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Product topology snapshot: After cleanup ===");
+        PrintShellTopology(after);
+        foreach (RendererProductCandidateTopologyTransition transition in result.Transitions)
+        {
+            Console.WriteLine(
+                $"topologyStep={transition.Index} | " +
+                $"revision={transition.PreviousTopology.Revision}->{transition.CurrentTopology.Revision} | " +
+                $"displays={transition.PreviousTopology.Displays.Count}->{transition.CurrentTopology.Displays.Count} | " +
+                $"kind={transition.Reconciliation.Kind} | " +
+                $"terminal={transition.Reconciliation.TerminalState} | " +
+                $"activeSessions={transition.ActiveSessions.Count} | " +
+                $"retiredSessions={transition.RetiredSessions.Sessions.Count} | " +
+                $"retiredClean={transition.RetiredSessions.OwnedResourcesCleaned}.");
+            foreach (DisplayReconciliationTimelineEntry entry in
+                     transition.Reconciliation.Timeline)
+            {
+                Console.WriteLine(
+                    $"topologyRevision={entry.TopologyRevision} | " +
+                    $"generation={entry.HostGeneration?.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture) ?? "none"} | " +
+                    $"phase={entry.Phase} | outcome={entry.Outcome} | " +
+                    $"reason={entry.FailureReason} | elapsedMs={entry.Elapsed.TotalMilliseconds:0.###}");
+            }
+        }
+        bool primarySwitchObserved = false;
+        bool primarySwitchInvariantValid = true;
+        bool scaleOnlyChangeObserved = false;
+        bool scaleOnlyChangeInvariantValid = true;
+        IReadOnlyList<ProductCandidateSessionResult> previousSessions = result.Initial.Sessions;
+        foreach (RendererProductCandidateTopologyTransition transition in result.Transitions)
+        {
+            if (IsPrimaryFlagOnlyTopologyChange(
+                    transition.PreviousTopology,
+                    transition.CurrentTopology))
+            {
+                primarySwitchObserved = true;
+                int replacementCount = transition.Reconciliation.Timeline.Count(entry =>
+                    entry.Phase == DisplayReconciliationPhase.SurfacesReplaced &&
+                    entry.Outcome == ApplyStageOutcome.Success);
+                primarySwitchInvariantValid &=
+                    transition.Reconciliation.Kind == DisplayReconciliationKind.NoChange &&
+                    transition.Reconciliation.HostGeneration is null &&
+                    replacementCount == 0 &&
+                    transition.RetiredSessions.Sessions.Count == 0 &&
+                    previousSessions.Select(item => item.SessionId).ToHashSet().SetEquals(
+                        transition.ActiveSessions.Select(item => item.SessionId));
+            }
+            HashSet<DisplayId>? scaleChangedDisplayIds =
+                GetScaleOnlyChangedDisplayIds(
+                    transition.PreviousTopology,
+                    transition.CurrentTopology);
+            if (scaleChangedDisplayIds is not null)
+            {
+                scaleOnlyChangeObserved = true;
+                ProductCandidateSessionResult[] affectedBefore = previousSessions
+                    .Where(session => session.DisplayIds.Any(scaleChangedDisplayIds.Contains))
+                    .ToArray();
+                ProductCandidateSessionResult[] preservedBefore = previousSessions
+                    .Where(session => session.DisplayIds.All(id =>
+                        !scaleChangedDisplayIds.Contains(id)))
+                    .ToArray();
+                HashSet<SessionId> activeIds = transition.ActiveSessions
+                    .Select(session => session.SessionId)
+                    .ToHashSet();
+                int replacementCount = transition.Reconciliation.Timeline.Count(entry =>
+                    entry.Phase == DisplayReconciliationPhase.SurfacesReplaced &&
+                    entry.Outcome == ApplyStageOutcome.Success);
+                scaleOnlyChangeInvariantValid &=
+                    transition.Reconciliation.Kind == DisplayReconciliationKind.Reconfigure &&
+                    replacementCount == 1 &&
+                    transition.RetiredSessions.Sessions.Count == affectedBefore.Length &&
+                    affectedBefore.All(session => !activeIds.Contains(session.SessionId)) &&
+                    preservedBefore.All(session => activeIds.Contains(session.SessionId));
+            }
+            previousSessions = transition.ActiveSessions;
+        }
+        bool ownedWindowsRemain = after.ShellDescendants.Any(window =>
+            window.ClassName.StartsWith(
+                RaisedDesktopHostSurfaceLease.WindowClassPrefix,
+                StringComparison.Ordinal) ||
+            window.ClassName.StartsWith(
+                RendererChildDirectCompositionSession.WindowClassPrefix,
+                StringComparison.Ordinal) ||
+            window.ClassName.StartsWith(
+                DesktopTransitionGuardProbe.WindowClassPrefix,
+                StringComparison.Ordinal));
+        bool transitionGuardValid = !transitionGuardProbe ||
+            result.TransitionGuard is
+            {
+                State: DesktopTransitionGuardProbeState.Retired,
+                ArmedBeforeChange: true,
+                PostArmWindowMutationCount: 0,
+                ShellGenerationUnchanged: true,
+                TargetReachedCandidateBounds: true,
+                OwnedWindowsRemain: false,
+                Plan.Availability: DesktopTransitionGuardAvailability.Available,
+                Plan.AdjacentDisplayIntersection: 0,
+            };
+        bool valid = result.Transitions.Count == topologyChanges &&
+            result.Transitions.All(item =>
+                item.Reconciliation.TerminalState ==
+                    DisplayReconciliationTerminalState.Succeeded &&
+                item.RetiredSessions.OwnedResourcesCleaned) &&
+            primarySwitchInvariantValid &&
+            scaleOnlyChangeInvariantValid &&
+            transitionGuardValid &&
+            result.FinalRetirement.OwnedResourcesCleaned &&
+            !ownedWindowsRemain;
+        Console.WriteLine(
+            $"Product topology result: valid={valid} | transitions={result.Transitions.Count} | " +
+            $"primarySwitchObserved={primarySwitchObserved} | " +
+            $"primarySwitchInvariantValid={primarySwitchInvariantValid} | " +
+            $"scaleOnlyChangeObserved={scaleOnlyChangeObserved} | " +
+            $"scaleOnlyChangeInvariantValid={scaleOnlyChangeInvariantValid} | " +
+            $"transitionGuardValid={transitionGuardValid} | " +
+            $"finalGraceful={result.FinalRetirement.Graceful} | " +
+            $"finalClean={result.FinalRetirement.OwnedResourcesCleaned} | " +
+            $"ownedWindowsRemain={ownedWindowsRemain}.");
+        return valid ? 0 : RendererChildProbeFailedExitCode;
+    }
+
+    private static string FormatBounds(DisplayBounds bounds) =>
+        $"{bounds.X},{bounds.Y},{bounds.Width}x{bounds.Height}";
+
+    private static async Task<bool> VerifyTopologyStableAsync(
+        WindowsDisplayTopologySource topologySource,
+        DisplayTopology expected,
+        TimeSpan duration,
+        CancellationToken cancellationToken)
+    {
+        long expectedRevision = expected.Revision;
+        DateTime deadline = DateTime.UtcNow.Add(duration);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                DisplayTopology observed = topologySource.Refresh() with
+                {
+                    Revision = expectedRevision,
+                };
+                if (!SameDisplayTopology(expected, observed))
+                {
+                    Console.WriteLine(
+                        $"TOPOLOGY_OBSERVATION_CHANGED expected={FormatDisplaySummary(expected)} | " +
+                        $"observed={FormatDisplaySummary(observed)}.");
+                    return false;
+                }
+            }
+            catch (InvalidOperationException exception)
+            {
+                Console.WriteLine(
+                    $"TOPOLOGY_OBSERVATION_TRANSIENT detail={exception.Message}");
+            }
+            TimeSpan remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+            await Task.Delay(
+                    remaining < TimeSpan.FromMilliseconds(100)
+                        ? remaining
+                        : TimeSpan.FromMilliseconds(100),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        return true;
+    }
+
+    private static bool IsPrimaryFlagOnlyTopologyChange(
+        DisplayTopology previous,
+        DisplayTopology current)
+    {
+        if (previous.Displays.Count != current.Displays.Count)
+        {
+            return false;
+        }
+
+        Dictionary<DisplayId, DisplayDescriptor> previousById = previous.Displays
+            .ToDictionary(display => display.Id);
+        bool primaryChanged = false;
+        foreach (DisplayDescriptor next in current.Displays)
+        {
+            if (!previousById.TryGetValue(next.Id, out DisplayDescriptor? old) ||
+                old.DevicePath != next.DevicePath ||
+                old.Bounds != next.Bounds ||
+                old.ScaleFactor != next.ScaleFactor)
+            {
+                return false;
+            }
+            primaryChanged |= old.IsPrimary != next.IsPrimary;
+        }
+        return primaryChanged;
+    }
+
+    private static HashSet<DisplayId>? GetScaleOnlyChangedDisplayIds(
+        DisplayTopology previous,
+        DisplayTopology current)
+    {
+        if (previous.Displays.Count != current.Displays.Count)
+        {
+            return null;
+        }
+
+        Dictionary<DisplayId, DisplayDescriptor> previousById = previous.Displays
+            .ToDictionary(display => display.Id);
+        HashSet<DisplayId> changed = [];
+        foreach (DisplayDescriptor next in current.Displays)
+        {
+            if (!previousById.TryGetValue(next.Id, out DisplayDescriptor? old) ||
+                old.DevicePath != next.DevicePath ||
+                old.Bounds != next.Bounds ||
+                old.IsPrimary != next.IsPrimary)
+            {
+                return null;
+            }
+            if (old.ScaleFactor != next.ScaleFactor)
+            {
+                changed.Add(next.Id);
+            }
+        }
+        return changed.Count > 0 ? changed : null;
+    }
+
+    private static async Task<int> RunProductCandidateTopologyChurnAsync(
+        DisplayTopology topology,
+        int durationSeconds,
+        int topologyChanges,
+        CancellationToken cancellationToken)
+    {
+        if (topology.Displays.Count < 1)
+        {
+            throw new InvalidOperationException(
+                "Topology churn diagnostics require an initially connected display.");
+        }
+
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Product topology churn snapshot: Before ===");
+        PrintShellTopology(before);
+        WindowsBuildIdentity build = WindowsShellTopologyDiagnostics.CaptureBuildIdentity();
+        using WindowsDisplayTopologySource topologySource = new();
+        DisplayTopology observedBaseline = topologySource.Current;
+        RendererProductCandidateTopologyChurnResult result =
+            await RendererProductCandidateDiagnostics.RunTopologyChurnAsync(
+                    new RendererProductCandidateTopologyChurnRequest(
+                        FindRendererChildExecutable(),
+                        new WindowsShellSnapshot(
+                            build.Version,
+                            build.Build,
+                            RaisedDesktopEnabled: true,
+                            build.UpdateBuildRevision),
+                        observedBaseline,
+                        topologyChanges,
+                        TimeSpan.FromSeconds(durationSeconds),
+                        ObserveTopologyChurnAsync(
+                            topologySource,
+                            observedBaseline,
+                            observedBaseline.Revision,
+                            topologyChanges,
+                            cancellationToken),
+                        ProductCandidateDisplaySelection.All,
+                        PreparedCommitHold: TimeSpan.FromSeconds(20)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Product topology churn snapshot: After cleanup ===");
+        PrintShellTopology(after);
+        foreach (RendererProductCandidateTopologyChurnRevision revision in result.Revisions)
+        {
+            Console.WriteLine(
+                $"churnStep={revision.Index} | " +
+                $"revision={revision.PreviousTopology.Revision}->{revision.CurrentTopology.Revision} | " +
+                $"displays={revision.PreviousTopology.Displays.Count}->{revision.CurrentTopology.Displays.Count} | " +
+                $"kind={revision.Reconciliation.Kind} | " +
+                $"terminal={revision.Reconciliation.TerminalState} | " +
+                $"reason={revision.Reconciliation.FailureReason}.");
+            foreach (DisplayReconciliationTimelineEntry entry in revision.Reconciliation.Timeline)
+            {
+                Console.WriteLine(
+                    $"topologyRevision={entry.TopologyRevision} | " +
+                    $"generation={entry.HostGeneration?.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture) ?? "none"} | " +
+                    $"phase={entry.Phase} | outcome={entry.Outcome} | " +
+                    $"reason={entry.FailureReason} | elapsedMs={entry.Elapsed.TotalMilliseconds:0.###}");
+            }
+        }
+
+        bool intermediateValid = result.Revisions.Take(result.Revisions.Count - 1).All(item =>
+            (item.Reconciliation.TerminalState == DisplayReconciliationTerminalState.Cancelled &&
+                item.Reconciliation.FailureReason == ApplyFailureReason.Superseded) ||
+            (item.Reconciliation.Kind is DisplayReconciliationKind.NoChange or
+                    DisplayReconciliationKind.Suspend &&
+                item.Reconciliation.TerminalState == DisplayReconciliationTerminalState.Succeeded));
+        int intermediateReplacements = result.Revisions.Take(result.Revisions.Count - 1)
+            .Sum(item => item.Reconciliation.Timeline.Count(entry =>
+                entry.Phase == DisplayReconciliationPhase.SurfacesReplaced &&
+                entry.Outcome == ApplyStageOutcome.Success));
+        RendererProductCandidateTopologyChurnRevision final = result.Revisions[^1];
+        int finalReplacements = final.Reconciliation.Timeline.Count(entry =>
+            entry.Phase == DisplayReconciliationPhase.SurfacesReplaced &&
+            entry.Outcome == ApplyStageOutcome.Success);
+        bool finalCommitValid = final.Reconciliation.Kind == DisplayReconciliationKind.Reconfigure
+            ? finalReplacements == 1
+            : finalReplacements == 0;
+        bool ownedWindowsRemain = after.ShellDescendants.Any(window =>
+            window.ClassName.StartsWith(
+                RaisedDesktopHostSurfaceLease.WindowClassPrefix,
+                StringComparison.Ordinal) ||
+            window.ClassName.StartsWith(
+                RendererChildDirectCompositionSession.WindowClassPrefix,
+                StringComparison.Ordinal));
+        bool valid = intermediateValid &&
+            intermediateReplacements == 0 &&
+            final.Reconciliation.TerminalState == DisplayReconciliationTerminalState.Succeeded &&
+            finalCommitValid &&
+            result.FinalRetirement.Graceful &&
+            result.FinalRetirement.OwnedResourcesCleaned &&
+            !ownedWindowsRemain;
+        Console.WriteLine(
+            $"Product topology churn result: valid={valid} | " +
+            $"published={result.Revisions.Count} | intermediateValid={intermediateValid} | " +
+            $"intermediateReplacements={intermediateReplacements} | " +
+            $"finalReplacements={finalReplacements} | finalSessions={result.FinalActiveSessions.Count} | " +
+            $"finalGraceful={result.FinalRetirement.Graceful} | " +
+            $"finalClean={result.FinalRetirement.OwnedResourcesCleaned} | " +
+            $"ownedWindowsRemain={ownedWindowsRemain}.");
+        return valid ? 0 : RendererChildProbeFailedExitCode;
+    }
+
+    private static async IAsyncEnumerable<DisplayTopology> ObserveTopologyChurnAsync(
+        WindowsDisplayTopologySource topologySource,
+        DisplayTopology initialBaseline,
+        long initialHostRevision,
+        int topologyChanges,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        Console.WriteLine(
+            $"TOPOLOGY_CHURN_READY changes={topologyChanges} | " +
+            "perform the explicitly approved physical sequence without waiting for each " +
+            "reconciliation; the tool continuously samples for up to 10 minutes.");
+        DisplayTopology baseline = initialBaseline;
+        long hostRevision = initialHostRevision;
+        int published = 0;
+        DateTime deadline = DateTime.UtcNow.AddMinutes(10);
+        while (published < topologyChanges && DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            DisplayTopology observed;
+            try
+            {
+                observed = topologySource.Refresh();
+            }
+            catch (InvalidOperationException exception)
+            {
+                Console.WriteLine(
+                    $"TOPOLOGY_CHURN_SNAPSHOT_TRANSIENT published={published} | " +
+                    $"detail={exception.Message}");
+                await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+            if (SameDisplayTopology(baseline, observed))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            // Require a short stable sample, but never wait for Host reconciliation. A later
+            // physical state can therefore supersede preparation for the topology just yielded.
+            await Task.Delay(TimeSpan.FromMilliseconds(350), cancellationToken)
+                .ConfigureAwait(false);
+            DisplayTopology stable = topologySource.Refresh();
+            if (!SameDisplayTopology(observed, stable))
+            {
+                continue;
+            }
+
+            published++;
+            hostRevision = checked(hostRevision + 1);
+            DisplayTopology normalized = stable with { Revision = hostRevision };
+            Console.WriteLine(
+                $"TOPOLOGY_CHURN_PUBLISHED index={published} | " +
+                $"displays={baseline.Displays.Count}->{normalized.Displays.Count} | " +
+                $"revision={normalized.Revision} | before={FormatDisplaySummary(baseline)} | " +
+                $"after={FormatDisplaySummary(normalized)}.");
+            baseline = stable;
+            yield return normalized;
+        }
+
+        if (published < topologyChanges)
+        {
+            throw new TimeoutException(
+                $"Topology churn observed {published} of {topologyChanges} required published " +
+                "changes within 10 minutes.");
+        }
+    }
+
+    private static bool SameDisplayTopology(DisplayTopology left, DisplayTopology right) =>
+        left.Displays.Count == right.Displays.Count &&
+        left.Displays.SequenceEqual(right.Displays);
+
+    private static string FormatDisplaySummary(DisplayTopology topology) =>
+        string.Join(
+            ";",
+            topology.Displays.Select(display =>
+                $"{display.Id.Value}:{display.Bounds.X},{display.Bounds.Y}," +
+                $"{display.Bounds.Width}x{display.Bounds.Height}@" +
+                $"{display.ScaleFactor.ToString(System.Globalization.CultureInfo.InvariantCulture)}"));
 
     private static ShellWindowFingerprint FindProgman(ShellTopologySnapshot snapshot) =>
         snapshot.TopLevelWindows.Single(window =>
@@ -1147,6 +2147,90 @@ internal static class Program
         };
     }
 
+    private static async Task<int> RunProductCandidateReplacementFaultAsync(
+        DisplayTopology topology,
+        int observationSeconds,
+        string targetDisplay,
+        ProbeFaultPlan plan,
+        CancellationToken cancellationToken)
+    {
+        plan.Validate();
+        ProductCandidateDisplaySelection selection =
+            ParseProductCandidateDisplaySelection(targetDisplay);
+        IReadOnlyList<DisplayId> selectedDisplays =
+            RendererProductCandidateDiagnostics.ResolveDisplayIds(topology, selection);
+        if (selectedDisplays.Count < 2 || plan.TargetSurfaceOrdinal > selectedDisplays.Count)
+        {
+            throw new ArgumentException(
+                "Replacement fault mode requires at least two selected displays and a valid Surface ordinal.");
+        }
+
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Replacement fault snapshot: Before ===");
+        PrintShellTopology(before);
+        WindowsBuildIdentity build = WindowsShellTopologyDiagnostics.CaptureBuildIdentity();
+        Console.WriteLine(
+            $"Sequence: Apply A succeeds -> Apply B injects {plan.Phase}/{plan.Action} " +
+            $"at Surface {plan.TargetSurfaceOrdinal} -> Apply C succeeds.");
+        RendererProductCandidateReplacementFaultResult result =
+            await RendererProductCandidateDiagnostics.RunReplacementFaultAsync(
+                    new RendererProductCandidateReplacementFaultRequest(
+                        FindRendererChildExecutable(),
+                        new WindowsShellSnapshot(
+                            build.Version,
+                            build.Build,
+                            RaisedDesktopEnabled: true,
+                            build.UpdateBuildRevision),
+                        topology,
+                        TimeSpan.FromSeconds(observationSeconds),
+                        new DiagnosticRendererEnvironmentTarget(
+                            plan.TargetIteration,
+                            plan.TargetSurfaceOrdinal,
+                            new Dictionary<string, string>(StringComparer.Ordinal)
+                            {
+                                [ProbeFaultPlan.EnvironmentVariableName] = plan.Serialize(),
+                            }),
+                        selection,
+                        TimeSpan.FromSeconds(2)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        (ApplyGenerationPhase expectedPhase, ApplyFailureReason expectedReason) =
+            ExpectedFaultResult(plan);
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Replacement fault snapshot: After cleanup ===");
+        PrintShellTopology(after);
+        bool ownedWindowsRemain = after.ShellDescendants.Any(window =>
+            window.ClassName.StartsWith(
+                RaisedDesktopHostSurfaceLease.WindowClassPrefix,
+                StringComparison.Ordinal) ||
+            window.ClassName.StartsWith(
+                RendererChildDirectCompositionSession.WindowClassPrefix,
+                StringComparison.Ordinal));
+        bool valid = result.FailedAttempt.State == ApplyGenerationTerminalState.Failed &&
+            result.FailedAttempt.TerminalPhase == expectedPhase &&
+            result.FailedAttempt.FailureReason == expectedReason &&
+            result.PreviousSessionsPreserved &&
+            !result.FailedAttemptReplacedSurfaces &&
+            result.FailedAttemptResourcesCleaned &&
+            result.PreviousSessionRetirement.Graceful &&
+            result.PreviousSessionRetirement.OwnedResourcesCleaned &&
+            result.FinalRetirement.Graceful &&
+            result.FinalRetirement.OwnedResourcesCleaned &&
+            !ownedWindowsRemain;
+        Console.WriteLine(
+            $"Replacement fault result: valid={valid} | " +
+            $"A={result.CommittedBeforeFailure.HostGeneration} | " +
+            $"B={result.FailedAttempt.Generation}/{result.FailedAttempt.TerminalPhase}/" +
+            $"{result.FailedAttempt.FailureReason} | " +
+            $"oldSessionsPreserved={result.PreviousSessionsPreserved} | " +
+            $"BReplace={result.FailedAttemptReplacedSurfaces} | " +
+            $"BResourcesCleaned={result.FailedAttemptResourcesCleaned} | " +
+            $"C={result.CommittedAfterFailure.HostGeneration} | " +
+            $"ownedWindowsRemain={ownedWindowsRemain}.");
+        return valid ? 0 : RendererChildProbeFailedExitCode;
+    }
+
     private static ProductCandidateDisplaySelection ParseProductCandidateDisplaySelection(
         string value)
     {
@@ -1166,6 +2250,7 @@ internal static class Program
         int durationSeconds,
         int iterations,
         string targetDisplay,
+        IReadOnlyList<LayoutMode>? layoutSequence,
         CancellationToken cancellationToken)
     {
         ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
@@ -1184,13 +2269,15 @@ internal static class Program
                         topology,
                         TimeSpan.FromSeconds(durationSeconds),
                         iterations,
-                        ParseProductCandidateDisplaySelection(targetDisplay)),
+                        ParseProductCandidateDisplaySelection(targetDisplay),
+                        LayoutSequence: layoutSequence),
                     cancellationToken)
                 .ConfigureAwait(false);
         foreach (RendererProductCandidateIterationResult iteration in result.Iterations)
         {
             Console.WriteLine(
                 $"Loop iteration={iteration.Iteration} | generation={iteration.HostGeneration} | " +
+                $"layout={iteration.LayoutMode} | " +
                 $"sessions={iteration.Sessions.Count} | " +
                 $"surfaces={iteration.SurfaceCount} | elapsedMs={iteration.GenerationResult.Elapsed.TotalMilliseconds:0.###}");
             foreach (ProductCandidateSessionResult session in iteration.Sessions)
@@ -1227,20 +2314,23 @@ internal static class Program
         bool allSucceeded = result.Iterations.Count == iterations &&
             result.Iterations.All(item =>
                 item.GenerationResult.State == ApplyGenerationTerminalState.Succeeded);
-        int sessionsPerIteration = result.Iterations.Count == 0
+        int finalSessionCount = result.Iterations.Count == 0
             ? 0
-            : result.Iterations[0].Sessions.Count;
-        int expectedRetirements = iterations * sessionsPerIteration;
-        bool allRetired = sessionsPerIteration > 0 &&
+            : result.Iterations[^1].Sessions.Count;
+        int expectedRetirements = result.Iterations.Sum(item => item.Sessions.Count);
+        int expectedReplacementRetirements = result.Iterations
+            .Take(Math.Max(0, result.Iterations.Count - 1))
+            .Sum(item => item.Sessions.Count);
+        bool allRetired = finalSessionCount > 0 &&
             result.RetirementResult.Sessions.Count == expectedRetirements &&
             result.RetirementResult.Graceful &&
             result.RetirementResult.OwnedResourcesCleaned;
         bool triggersCorrect = result.Retirements.Count(item =>
                 StringComparer.Ordinal.Equals(item.Trigger, "Replacement")) ==
-                    (iterations - 1) * sessionsPerIteration &&
+                    expectedReplacementRetirements &&
             result.Retirements.Count(item =>
-                StringComparer.Ordinal.Equals(item.Trigger, "Shutdown")) == sessionsPerIteration &&
-            result.Retirements.TakeLast(sessionsPerIteration).All(item =>
+                StringComparer.Ordinal.Equals(item.Trigger, "Shutdown")) == finalSessionCount &&
+            result.Retirements.TakeLast(finalSessionCount).All(item =>
                 StringComparer.Ordinal.Equals(item.Trigger, "Shutdown"));
         Console.WriteLine(
             $"Loop verification: allSucceeded={allSucceeded} | allRetired={allRetired} | " +
@@ -1250,6 +2340,103 @@ internal static class Program
             !ownedWindowsRemain && addedWorkerCount == 0
             ? 0
             : RendererChildProbeFailedExitCode;
+    }
+
+    private static async Task<int> RunProductCandidateRetirementFaultAsync(
+        DisplayTopology topology,
+        int durationSeconds,
+        string targetDisplay,
+        ProbeFaultPlan plan,
+        CancellationToken cancellationToken)
+    {
+        if (plan.TargetIteration != 1 || plan.Phase != ProbeFaultPhase.ShutdownCompleted ||
+            plan.Action != ProbeFaultAction.SuppressEvent)
+        {
+            throw new ArgumentException(
+                "Retirement fault mode requires iteration 1, ShutdownCompleted/SuppressEvent.");
+        }
+        ProductCandidateDisplaySelection selection =
+            ParseProductCandidateDisplaySelection(targetDisplay);
+        IReadOnlyList<DisplayId> selectedDisplays =
+            RendererProductCandidateDiagnostics.ResolveDisplayIds(topology, selection);
+        if (selectedDisplays.Count < 2 || plan.TargetSurfaceOrdinal > selectedDisplays.Count)
+        {
+            throw new ArgumentException(
+                "Retirement fault mode requires at least two selected displays and a valid Surface ordinal.");
+        }
+
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Retirement fault snapshot: Before ===");
+        PrintShellTopology(before);
+        WindowsBuildIdentity build = WindowsShellTopologyDiagnostics.CaptureBuildIdentity();
+        RendererProductCandidateLoopResult result =
+            await RendererProductCandidateDiagnostics.RunLoopAsync(
+                    new RendererProductCandidateLoopRequest(
+                        FindRendererChildExecutable(),
+                        new WindowsShellSnapshot(
+                            build.Version,
+                            build.Build,
+                            RaisedDesktopEnabled: true,
+                            build.UpdateBuildRevision),
+                        topology,
+                        TimeSpan.FromSeconds(durationSeconds),
+                        2,
+                        selection,
+                        new DiagnosticRendererEnvironmentTarget(
+                            plan.TargetIteration,
+                            plan.TargetSurfaceOrdinal,
+                            new Dictionary<string, string>(StringComparer.Ordinal)
+                            {
+                                [ProbeFaultPlan.EnvironmentVariableName] = plan.Serialize(),
+                            }),
+                        RetirementTimeout: TimeSpan.FromSeconds(2)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        RendererProductCandidateLoopRetirement[] replacementRetirements = result.Retirements
+            .Where(item => StringComparer.Ordinal.Equals(item.Trigger, "Replacement"))
+            .OrderBy(item => item.Result.SurfaceOrdinal)
+            .ToArray();
+        RendererProductCandidateLoopRetirement[] finalRetirements = result.Retirements
+            .Where(item => StringComparer.Ordinal.Equals(item.Trigger, "Shutdown"))
+            .OrderBy(item => item.Result.SurfaceOrdinal)
+            .ToArray();
+        SessionRetirementResult? faulted = replacementRetirements.FirstOrDefault(item =>
+            item.Result.SurfaceOrdinal == plan.TargetSurfaceOrdinal)?.Result;
+        bool replacementRetirementValid = replacementRetirements.Length == selectedDisplays.Count &&
+            replacementRetirements.Where(item => item.Result != faulted).All(item =>
+                item.Result.Graceful && item.Result.OwnedResourcesCleaned) &&
+            faulted is not null && !faulted.Graceful && faulted.OwnedResourcesCleaned &&
+            faulted.Issues.Any(issue => issue.Kind == SessionRetirementIssueKind.ShutdownTimeout);
+        bool finalRetirementValid = finalRetirements.Length == selectedDisplays.Count &&
+            finalRetirements.All(item => item.Result.Graceful && item.Result.OwnedResourcesCleaned);
+
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Retirement fault snapshot: After cleanup ===");
+        PrintShellTopology(after);
+        HashSet<ulong> beforeWorkers = DirectShellWorkers(before);
+        HashSet<ulong> afterWorkers = DirectShellWorkers(after);
+        bool ownedWindowsRemain = after.ShellDescendants.Any(window =>
+            window.ClassName.StartsWith(
+                RaisedDesktopHostSurfaceLease.WindowClassPrefix,
+                StringComparison.Ordinal) ||
+            window.ClassName.StartsWith(
+                RendererChildDirectCompositionSession.WindowClassPrefix,
+                StringComparison.Ordinal));
+        bool valid = result.Iterations.Count == 2 &&
+            result.Iterations.All(item =>
+                item.GenerationResult.State == ApplyGenerationTerminalState.Succeeded) &&
+            replacementRetirementValid && finalRetirementValid &&
+            result.OwnedResourcesCleaned && !ownedWindowsRemain &&
+            !afterWorkers.Except(beforeWorkers).Any();
+        Console.WriteLine(
+            $"Retirement fault result: valid={valid} | BCommitted=True | " +
+            $"replacementGraceful={replacementRetirements.Sum(item => item.Result.Graceful ? 1 : 0)}/" +
+            $"{replacementRetirements.Length} | targetShutdownTimeout=" +
+            $"{faulted?.Issues.Any(issue => issue.Kind == SessionRetirementIssueKind.ShutdownTimeout)} | " +
+            $"targetDisposed={faulted?.RendererDisposed} | targetSurfacesCleaned={faulted?.SurfacesCleaned} | " +
+            $"finalGraceful={finalRetirementValid} | ownedWindowsRemain={ownedWindowsRemain}.");
+        return valid ? 0 : RendererChildProbeFailedExitCode;
     }
 
     private static async Task TryWriteProductCandidateFailureAsync(
@@ -1367,6 +2554,15 @@ internal static class Program
                 StringComparer.Ordinal.Equals(window.ClassName, "WorkerW"))
             .Select(window => window.WindowHandle)
             .ToHashSet();
+
+    private static bool HasLiveWallOwnedWindows(ShellTopologySnapshot snapshot) =>
+        snapshot.ShellDescendants.Any(window =>
+            window.ClassName.StartsWith(
+                RaisedDesktopHostSurfaceLease.WindowClassPrefix,
+                StringComparison.Ordinal) ||
+            window.ClassName.StartsWith(
+                RendererChildDirectCompositionSession.WindowClassPrefix,
+                StringComparison.Ordinal));
 
     private static string FormatHandles(IEnumerable<ulong> handles)
     {
@@ -1765,12 +2961,26 @@ internal static class Program
         bool ProductCandidateEnabled,
         bool ProductCandidateLoopEnabled,
         bool ProductCandidateFaultEnabled,
+        bool ProductCandidateReplacementFaultEnabled,
+        bool ProductCandidateRetirementFaultEnabled,
+        bool ProductCandidateRecoveryEnabled,
+        bool ProductCandidateTopologyEnabled,
+        bool ProductCandidateTopologyChurnEnabled,
+        bool HostTaskbarNoopEnabled,
+        bool HostExplorerEventRecoveryEnabled,
+        bool HostSessionLockEnabled,
+        bool HostSleepResumeEnabled,
+        bool TransitionGuardProbeEnabled,
         bool SimulateRendererCrash,
         RaisedDesktopPresentationKind? PresentationKind,
         int DurationSeconds,
         int? SoakSeconds,
         int Iterations,
+        int TopologyChanges,
+        int SignalCount,
         string TargetDisplay,
+        LayoutMode LayoutMode,
+        IReadOnlyList<LayoutMode>? LayoutSequence,
         string? ResultJsonPath,
         ProbeFaultPlan? FaultPlan)
     {
@@ -1786,15 +2996,34 @@ internal static class Program
             bool productCandidate = false;
             bool productCandidateLoop = false;
             bool productCandidateFault = false;
+            bool productCandidateReplacementFault = false;
+            bool productCandidateRetirementFault = false;
+            bool productCandidateRecovery = false;
+            bool productCandidateTopology = false;
+            bool productCandidateTopologyChurn = false;
+            bool hostTaskbarNoop = false;
+            bool hostExplorerEventRecovery = false;
+            bool hostSessionLock = false;
+            bool hostSleepResume = false;
+            bool transitionGuardProbe = false;
+            bool confirmDisplayChange = false;
+            bool confirmDisplayRotation = false;
             bool simulateRendererCrash = false;
             RaisedDesktopPresentationKind? raisedDesktopPresentationKind = null;
             bool durationSpecified = false;
             bool iterationsSpecified = false;
+            bool topologyChangesSpecified = false;
+            bool signalCountSpecified = false;
             int duration = DefaultColorBlockSeconds;
             int? soakSeconds = null;
             int iterations = 20;
+            int topologyChanges = 2;
+            int signalCount = 10;
             string targetDisplay = "primary";
             bool targetDisplaySpecified = false;
+            LayoutMode layoutMode = LayoutMode.PerDisplay;
+            bool layoutModeSpecified = false;
+            System.Collections.ObjectModel.ReadOnlyCollection<LayoutMode>? layoutSequence = null;
             string? resultJsonPath = null;
             ProbeFaultPhase? faultPhase = null;
             ProbeFaultAction? faultAction = null;
@@ -1836,6 +3065,51 @@ internal static class Program
                     case "--raised-desktop-product-candidate-fault":
                         productCandidateFault = true;
                         break;
+                    case "--raised-desktop-product-candidate-replacement-fault":
+                        productCandidateReplacementFault = true;
+                        break;
+                    case "--raised-desktop-product-candidate-retirement-fault":
+                        productCandidateRetirementFault = true;
+                        break;
+                    case "--raised-desktop-product-candidate-recovery":
+                        productCandidateRecovery = true;
+                        break;
+                    case "--raised-desktop-product-candidate-topology":
+                        productCandidateTopology = true;
+                        break;
+                    case "--raised-desktop-product-candidate-topology-churn":
+                        productCandidateTopologyChurn = true;
+                        break;
+                    case "--raised-desktop-host-taskbar-noop":
+                        hostTaskbarNoop = true;
+                        break;
+                    case "--raised-desktop-host-explorer-event-recovery":
+                        hostExplorerEventRecovery = true;
+                        break;
+                    case "--raised-desktop-host-session-lock":
+                        hostSessionLock = true;
+                        break;
+                    case "--raised-desktop-host-sleep-resume":
+                        hostSleepResume = true;
+                        break;
+                    case "--signal-count" when index + 1 < args.Length:
+                        signalCountSpecified = true;
+                        if (!int.TryParse(args[++index], out signalCount) ||
+                            signalCount is < 1 or > 100)
+                        {
+                            throw new ArgumentException(
+                                "Taskbar signal count must be between 1 and 100.");
+                        }
+                        break;
+                    case "--raised-desktop-transition-guard-probe":
+                        transitionGuardProbe = true;
+                        break;
+                    case "--confirm-display-change":
+                        confirmDisplayChange = true;
+                        break;
+                    case "--confirm-display-rotation":
+                        confirmDisplayRotation = true;
+                        break;
                     case "--fault-phase" when index + 1 < args.Length:
                         faultPhase = ParseFaultPhase(args[++index]);
                         break;
@@ -1866,6 +3140,15 @@ internal static class Program
                             throw new ArgumentException("Loop iterations must be between 2 and 100.");
                         }
                         break;
+                    case "--topology-changes" when index + 1 < args.Length:
+                        topologyChangesSpecified = true;
+                        if (!int.TryParse(args[++index], out topologyChanges) ||
+                            topologyChanges is < 1 or > 8)
+                        {
+                            throw new ArgumentException(
+                                "Topology changes must be between 1 and 8.");
+                        }
+                        break;
                     case "--result-json" when index + 1 < args.Length:
                         resultJsonPath = args[++index];
                         break;
@@ -1875,6 +3158,34 @@ internal static class Program
                         if (string.IsNullOrWhiteSpace(targetDisplay))
                         {
                             throw new ArgumentException("--target-display requires a value.");
+                        }
+                        break;
+                    case "--layout-mode" when index + 1 < args.Length:
+                        layoutModeSpecified = true;
+                        layoutMode = args[++index] switch
+                        {
+                            "per-display" => LayoutMode.PerDisplay,
+                            "span" => LayoutMode.Span,
+                            string value => throw new ArgumentException(
+                                $"Unknown layout mode '{value}'."),
+                        };
+                        break;
+                    case "--layout-sequence" when index + 1 < args.Length:
+                        layoutSequence = Array.AsReadOnly(args[++index]
+                            .Split(',', StringSplitOptions.RemoveEmptyEntries |
+                                StringSplitOptions.TrimEntries)
+                            .Select(value => value switch
+                            {
+                                "per-display" => LayoutMode.PerDisplay,
+                                "span" => LayoutMode.Span,
+                                _ => throw new ArgumentException(
+                                    $"Unknown layout sequence mode '{value}'."),
+                            })
+                            .ToArray());
+                        if (layoutSequence.Count == 0)
+                        {
+                            throw new ArgumentException(
+                                "--layout-sequence requires at least one layout mode.");
                         }
                         break;
                     case "--raised-desktop-color-block":
@@ -1913,19 +3224,38 @@ internal static class Program
             if (!colorBlock && raisedDesktopPresentationKind is null &&
                 !explorerRecoveryProbe && !rendererChildProbe &&
                 !rendererChildRecoveryProbe && !productCandidate &&
-                !productCandidateLoop && !productCandidateFault && durationSpecified)
+                !productCandidateLoop && !productCandidateFault &&
+                !productCandidateReplacementFault && !productCandidateRetirementFault &&
+                !productCandidateRecovery && !productCandidateTopology &&
+                !productCandidateTopologyChurn && !hostTaskbarNoop &&
+                !hostExplorerEventRecovery && !hostSessionLock && !hostSleepResume &&
+                !transitionGuardProbe && durationSpecified)
             {
                 throw new ArgumentException(
-                    "--duration-seconds requires --color-block, --raised-desktop-color-block, " +
-                    "or --raised-desktop-presentation-probe.");
+                    "--duration-seconds requires a color-block, presentation, product " +
+                    "candidate, recovery, topology, or topology-churn diagnostic mode.");
             }
 
-            bool recoveryRequested = explorerRecoveryProbe || rendererChildRecoveryProbe;
+            bool recoveryRequested = explorerRecoveryProbe || rendererChildRecoveryProbe ||
+                productCandidateRecovery || hostExplorerEventRecovery;
             if (recoveryRequested != confirmExplorerRestart)
             {
                 throw new ArgumentException(
                     "A Raised Desktop Explorer recovery probe requires " +
                     "--confirm-explorer-restart, and that confirmation flag is not valid alone.");
+            }
+            if ((productCandidateTopology || productCandidateTopologyChurn) !=
+                confirmDisplayChange)
+            {
+                throw new ArgumentException(
+                    "Product topology diagnostics require --confirm-display-change, and " +
+                    "that confirmation flag is not valid alone.");
+            }
+            if (transitionGuardProbe != confirmDisplayRotation)
+            {
+                throw new ArgumentException(
+                    "Transition guard diagnostics require --confirm-display-rotation, and " +
+                    "that confirmation flag is not valid alone.");
             }
 
             if (simulateRendererCrash && !rendererChildProbe)
@@ -1946,34 +3276,78 @@ internal static class Program
                     "--raised-desktop-product-candidate-fault.");
             }
             if (targetDisplaySpecified && !productCandidate && !productCandidateLoop &&
-                !productCandidateFault)
+                !productCandidateFault && !productCandidateReplacementFault &&
+                !productCandidateRetirementFault && !productCandidateRecovery &&
+                !hostTaskbarNoop && !hostExplorerEventRecovery && !hostSessionLock &&
+                !hostSleepResume && !transitionGuardProbe)
             {
                 throw new ArgumentException(
-                    "--target-display requires --raised-desktop-product-candidate or " +
-                    "--raised-desktop-product-candidate-loop/fault.");
+                    "--target-display requires a product candidate, loop/fault, or " +
+                    "transition guard diagnostic.");
+            }
+            if (transitionGuardProbe && !targetDisplaySpecified)
+            {
+                throw new ArgumentException(
+                    "Transition guard diagnostics require an explicit --target-display.");
+            }
+            if (layoutModeSpecified && !productCandidateTopology)
+            {
+                throw new ArgumentException(
+                    "--layout-mode currently requires " +
+                    "--raised-desktop-product-candidate-topology.");
+            }
+            if (layoutSequence is not null && !productCandidateLoop)
+            {
+                throw new ArgumentException(
+                    "--layout-sequence requires " +
+                    "--raised-desktop-product-candidate-loop.");
+            }
+            if (layoutSequence is not null && layoutSequence.Count != iterations)
+            {
+                throw new ArgumentException(
+                    "--layout-sequence must contain exactly one mode per iteration.");
             }
             if (iterationsSpecified && !productCandidateLoop)
             {
                 throw new ArgumentException(
                     "--iterations requires --raised-desktop-product-candidate-loop.");
             }
+            if (topologyChangesSpecified && !productCandidateTopology &&
+                !productCandidateTopologyChurn)
+            {
+                throw new ArgumentException(
+                    "--topology-changes requires --raised-desktop-product-candidate-topology.");
+            }
+            if (signalCountSpecified && !hostTaskbarNoop)
+            {
+                throw new ArgumentException(
+                    "--signal-count requires --raised-desktop-host-taskbar-noop.");
+            }
             if (soakSeconds is not null && durationSpecified)
             {
                 throw new ArgumentException(
                     "--soak-seconds and --duration-seconds cannot be combined.");
             }
-            if (productCandidateFault && (faultPhase is null || faultAction is null))
+            bool requiredProductFault = productCandidateFault ||
+                productCandidateReplacementFault || productCandidateRetirementFault;
+            bool hasFaultOptions = faultPhase is not null || faultAction is not null ||
+                targetSurfaceOrdinal != 2;
+            if (requiredProductFault && (faultPhase is null || faultAction is null))
             {
                 throw new ArgumentException(
                     "Product candidate fault mode requires --fault-phase and --fault-action.");
             }
-            if (!productCandidateFault &&
-                (faultPhase is not null || faultAction is not null || targetSurfaceOrdinal != 2))
+            if (hasFaultOptions && (faultPhase is null) != (faultAction is null))
             {
                 throw new ArgumentException(
-                    "Fault options require --raised-desktop-product-candidate-fault.");
+                    "--fault-phase and --fault-action must be specified together.");
             }
-            if (productCandidateFault && !targetDisplaySpecified)
+            if (hasFaultOptions && !requiredProductFault && !productCandidateRecovery)
+            {
+                throw new ArgumentException(
+                    "Fault options require a product candidate fault or recovery mode.");
+            }
+            if ((requiredProductFault || hasFaultOptions) && !targetDisplaySpecified)
             {
                 targetDisplay = "all";
             }
@@ -1987,6 +3361,16 @@ internal static class Program
                 Convert.ToInt32(productCandidate) +
                 Convert.ToInt32(productCandidateLoop) +
                 Convert.ToInt32(productCandidateFault) +
+                Convert.ToInt32(productCandidateReplacementFault) +
+                Convert.ToInt32(productCandidateRetirementFault) +
+                Convert.ToInt32(productCandidateRecovery) +
+                Convert.ToInt32(productCandidateTopology) +
+                Convert.ToInt32(productCandidateTopologyChurn) +
+                Convert.ToInt32(hostTaskbarNoop) +
+                Convert.ToInt32(hostExplorerEventRecovery) +
+                Convert.ToInt32(hostSessionLock) +
+                Convert.ToInt32(hostSleepResume) +
+                Convert.ToInt32(transitionGuardProbe) +
                 Convert.ToInt32(raisedDesktopPresentationKind is not null);
             if (modes > 1)
             {
@@ -2003,19 +3387,34 @@ internal static class Program
                 productCandidate,
                 productCandidateLoop,
                 productCandidateFault,
+                productCandidateReplacementFault,
+                productCandidateRetirementFault,
+                productCandidateRecovery,
+                productCandidateTopology,
+                productCandidateTopologyChurn,
+                hostTaskbarNoop,
+                hostExplorerEventRecovery,
+                hostSessionLock,
+                hostSleepResume,
+                transitionGuardProbe,
                 simulateRendererCrash,
                 raisedDesktopPresentationKind,
                 duration,
                 soakSeconds,
                 iterations,
+                topologyChanges,
+                signalCount,
                 targetDisplay,
+                layoutMode,
+                layoutSequence,
                 resultJsonPath,
-                productCandidateFault
+                requiredProductFault || hasFaultOptions
                     ? new ProbeFaultPlan(
-                        1,
+                        productCandidateReplacementFault ? 2 : 1,
                         targetSurfaceOrdinal,
                         faultPhase!.Value,
-                        faultAction!.Value)
+                        faultAction!.Value,
+                        TargetOccurrence: productCandidateRecovery ? 2 : 1)
                     : null);
         }
 

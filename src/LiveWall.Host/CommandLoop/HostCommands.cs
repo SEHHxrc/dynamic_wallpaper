@@ -1,4 +1,5 @@
 using LiveWall.Application.Sessions;
+using LiveWall.Application.Policies;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
 using LiveWall.Domain.Playback;
@@ -24,7 +25,21 @@ internal sealed record RemoveWallpaperCommand(WallpaperId WallpaperId) : HostCom
 
 internal sealed record DisplayTopologyChangedCommand(DisplayTopology Topology) : HostCommand;
 
-internal sealed record SystemPolicyChangedCommand(SystemStateSnapshot SystemState) : HostCommand;
+internal sealed record DisplayReconciliationPreparedCommand(
+    long Generation,
+    PreparedApply Prepared,
+    IReadOnlyList<SessionId> RetiredSessionIds,
+    int ReplacementAttempt = 0) : HostCommand;
+
+internal sealed record DisplayReconciliationFailedCommand(
+    long Generation,
+    long TopologyRevision,
+    string ErrorCode,
+    string Message,
+    ApplyGenerationPhase Phase,
+    ApplyFailureReason FailureReason) : HostCommand;
+
+internal sealed record SystemStateChangedCommand(SystemStateChange Change) : HostCommand;
 
 internal sealed record SetPlaybackPolicyCommand(UserPlaybackPolicy Policy) : HostCommand;
 
@@ -59,7 +74,9 @@ internal sealed record DesktopRecoveryPreparedCommand(
 internal sealed record DesktopRecoveryFailedCommand(
     long Generation,
     string ErrorCode,
-    string Message) : HostCommand;
+    string Message,
+    DesktopRecoveryPhase Phase,
+    ApplyFailureReason FailureReason) : HostCommand;
 
 internal sealed record RetryDesktopRecoveryCommand(
     long ExpectedGeneration,

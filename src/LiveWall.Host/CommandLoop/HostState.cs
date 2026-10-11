@@ -2,6 +2,7 @@ using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
 using LiveWall.Domain.Playback;
 using LiveWall.Domain.Sessions;
+using LiveWall.Application.Policies;
 using LiveWall.Host.Orchestration;
 
 namespace LiveWall.Host.CommandLoop;
@@ -20,6 +21,11 @@ internal sealed class HostState
     public SystemStateSnapshot SystemState { get; private set; } =
         new(false, false, false, false, false, false);
 
+    public long SystemStateRevision { get; private set; }
+
+    public SystemStateChangeReason SystemStateReason { get; private set; } =
+        SystemStateChangeReason.Initial;
+
     public UserPlaybackPolicy PlaybackPolicy { get; private set; } = UserPlaybackPolicy.Default;
 
     public bool ShutdownRequested { get; private set; }
@@ -37,15 +43,47 @@ internal sealed class HostState
         Revision++;
     }
 
-    public void SetSystemState(SystemStateSnapshot systemState)
+    public bool TrySetSystemState(
+        long revision,
+        SystemStateSnapshot systemState,
+        SystemStateChangeReason reason)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(revision);
+        ArgumentNullException.ThrowIfNull(systemState);
+        if (revision <= SystemStateRevision)
+        {
+            return false;
+        }
+
+        SystemStateRevision = revision;
         SystemState = systemState;
+        SystemStateReason = reason;
         Revision++;
+        return true;
     }
 
     public void SetPlaybackPolicy(UserPlaybackPolicy policy)
     {
         PlaybackPolicy = policy;
+        Revision++;
+    }
+
+    public void RestoreAssignments(IReadOnlyList<WallpaperAssignment> restoredAssignments)
+    {
+        ArgumentNullException.ThrowIfNull(restoredAssignments);
+        if (restoredAssignments.Select(item => item.DisplayId).Distinct().Count() !=
+            restoredAssignments.Count)
+        {
+            throw new ArgumentException(
+                "Persisted assignments must contain at most one entry per display.",
+                nameof(restoredAssignments));
+        }
+
+        assignments.Clear();
+        foreach (WallpaperAssignment assignment in restoredAssignments)
+        {
+            assignments.Add(assignment.DisplayId, assignment);
+        }
         Revision++;
     }
 
@@ -162,6 +200,55 @@ internal sealed class HostState
         return invalidated;
     }
 
+    public IReadOnlyList<PreparedSession> TakeSessions(IReadOnlyCollection<SessionId> sessionIds)
+    {
+        ArgumentNullException.ThrowIfNull(sessionIds);
+        HashSet<SessionId> targets = sessionIds.ToHashSet();
+        PreparedSession[] removed = sessions.Values
+            .Where(session => targets.Contains(session.Prepared.Session.Id))
+            .Select(session => session.Prepared)
+            .ToArray();
+        foreach (PreparedSession session in removed)
+        {
+            sessions.Remove(session.Session.Id);
+        }
+        if (removed.Length > 0)
+        {
+            Revision++;
+        }
+        return removed;
+    }
+
+    public IReadOnlyList<PreparedSession> CommitDisplayReconciliation(
+        PreparedApply prepared,
+        IReadOnlyCollection<SessionId> explicitRetiredSessionIds)
+    {
+        HashSet<SessionId> retireIds = explicitRetiredSessionIds.ToHashSet();
+        foreach (ActiveHostSession overlapping in FindSessionsReplacedBy(prepared.Assignments))
+        {
+            retireIds.Add(overlapping.Prepared.Session.Id);
+        }
+        PreparedSession[] retired = sessions.Values
+            .Where(session => retireIds.Contains(session.Prepared.Session.Id))
+            .Select(session => session.Prepared)
+            .ToArray();
+        foreach (PreparedSession session in retired)
+        {
+            sessions.Remove(session.Session.Id);
+        }
+
+        foreach (WallpaperAssignment assignment in prepared.Assignments)
+        {
+            assignments[assignment.DisplayId] = assignment;
+        }
+        foreach (PreparedSession session in prepared.Sessions)
+        {
+            sessions.Add(session.Session.Id, new ActiveHostSession(session, UserPlaybackIntent.Play));
+        }
+        Revision++;
+        return retired;
+    }
+
     public bool ReplaceRecoveredSessions(PreparedRecovery recovery)
     {
         if (!CanReplaceRecoveredSessions(recovery))
@@ -191,10 +278,16 @@ internal sealed class HostState
             sessions.TryGetValue(recovered.Previous.Session.Id, out ActiveHostSession? active) &&
             active.Prepared == recovered.Previous);
 
-    public void RequestShutdown()
+    public bool RequestShutdown()
     {
+        if (ShutdownRequested)
+        {
+            return false;
+        }
+
         ShutdownRequested = true;
         Revision++;
+        return true;
     }
 
     public HostStateSnapshot Snapshot() =>
@@ -212,7 +305,10 @@ internal sealed class HostState
                 .Select(session => new HostSessionSnapshot(
                     session.Prepared.Session,
                     session.UserIntent))
-                .ToArray());
+                .ToArray(),
+            SystemStateRevision,
+            SystemState,
+            SystemStateReason);
 }
 
 internal sealed record ActiveHostSession(
@@ -226,7 +322,10 @@ internal sealed record HostStateSnapshot(
     UserPlaybackPolicy PlaybackPolicy,
     DisplayTopology? DisplayTopology,
     IReadOnlyList<WallpaperAssignment> Assignments,
-    IReadOnlyList<HostSessionSnapshot> Sessions);
+    IReadOnlyList<HostSessionSnapshot> Sessions,
+    long SystemStateRevision,
+    SystemStateSnapshot SystemState,
+    SystemStateChangeReason SystemStateReason);
 
 internal sealed record HostSessionSnapshot(
     WallpaperSession Session,

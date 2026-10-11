@@ -10,7 +10,9 @@ internal interface IWindowsSystemStateSource : ISystemStateSource
 {
     void ProcessSignal(DesktopWindowSignal signal);
 
-    void CompleteEnvironmentValidation(bool shellAvailable);
+    void CompleteEnvironmentValidation(bool shellAvailable, long? expectedRevision = null);
+
+    bool RejectEnvironmentValidation(long expectedRevision);
 }
 
 public sealed class WindowsSystemStateSource : IWindowsSystemStateSource
@@ -48,12 +50,33 @@ public sealed class WindowsSystemStateSource : IWindowsSystemStateSource
     void IWindowsSystemStateSource.ProcessSignal(DesktopWindowSignal signal) =>
         ProcessSignal(signal);
 
-    void IWindowsSystemStateSource.CompleteEnvironmentValidation(bool shellAvailable) =>
-        CompleteEnvironmentValidation(shellAvailable);
+    void IWindowsSystemStateSource.CompleteEnvironmentValidation(bool shellAvailable, long? expectedRevision) =>
+        CompleteEnvironmentValidation(shellAvailable, expectedRevision);
+
+    bool IWindowsSystemStateSource.RejectEnvironmentValidation(long expectedRevision) =>
+        RejectEnvironmentValidation(expectedRevision);
+
+    internal bool RejectEnvironmentValidation(long expectedRevision)
+    {
+        lock (gate)
+        {
+            if (current.Revision != expectedRevision || pendingResume is null)
+            {
+                return false;
+            }
+            pendingResume = null;
+            return true;
+        }
+    }
 
     internal void ProcessSignal(DesktopWindowSignal signal)
     {
         ArgumentNullException.ThrowIfNull(signal);
+        if (signal.SessionId is int sessionId &&
+            sessionId != System.Diagnostics.Process.GetCurrentProcess().SessionId)
+        {
+            return;
+        }
         SystemStateChange? change = signal.Kind switch
         {
             DesktopWindowSignalKind.SessionLocked => PublishImmediate(
@@ -81,28 +104,31 @@ public sealed class WindowsSystemStateSource : IWindowsSystemStateSource
                 snapshot => snapshot with { IsSessionDisconnected = true },
                 SystemStateChangeReason.SessionDisconnected),
             DesktopWindowSignalKind.SessionReconnected => BeginValidatedResume(
-                snapshot => snapshot with { IsSessionDisconnected = false },
+                snapshot => snapshot with
+                {
+                    IsSessionDisconnected = false,
+                    IsRemoteSession = signal.Value != 0,
+                },
                 SystemStateChangeReason.SessionReconnectRequested,
                 SystemStateChangeReason.SessionReconnected),
             DesktopWindowSignalKind.RemoteSessionChanged => PublishImmediate(
                 snapshot => snapshot with { IsRemoteSession = signal.Value != 0 },
-                SystemStateChangeReason.RemoteSessionChanged,
-                cancelPendingResume: false),
+                SystemStateChangeReason.RemoteSessionChanged),
             DesktopWindowSignalKind.PowerSourceChanged => PublishImmediate(
                 snapshot => snapshot with { IsOnBattery = signal.Value != 0 },
-                SystemStateChangeReason.PowerSourceChanged,
-                cancelPendingResume: false),
+                SystemStateChangeReason.PowerSourceChanged),
             _ => null,
         };
         RaiseChanged(change);
     }
 
-    internal void CompleteEnvironmentValidation(bool shellAvailable)
+    internal void CompleteEnvironmentValidation(bool shellAvailable, long? expectedRevision = null)
     {
         List<SystemStateChange> changes = [];
         lock (gate)
         {
-            if (!shellAvailable || pendingResume is null)
+            if (!shellAvailable || pendingResume is null ||
+                (expectedRevision is long revision && revision != current.Revision))
             {
                 return;
             }
@@ -126,29 +152,42 @@ public sealed class WindowsSystemStateSource : IWindowsSystemStateSource
 
     private SystemStateChange? PublishImmediate(
         Func<SystemStateSnapshot, SystemStateSnapshot> update,
-        SystemStateChangeReason reason,
-        bool cancelPendingResume = true)
+        SystemStateChangeReason reason)
     {
         lock (gate)
         {
-            if (cancelPendingResume)
+            if (pendingResume is not null)
             {
-                pendingResume = null;
-            }
-            else if (pendingResume is not null)
-            {
+                // An inactive fact supersedes only its own pending resume, not
+                // unrelated unlock/display/power/session facts awaiting validation.
+                SystemStateChangeReason? superseded = reason switch
+                {
+                    SystemStateChangeReason.SessionLocked => SystemStateChangeReason.SessionUnlocked,
+                    SystemStateChangeReason.DisplayOff => SystemStateChangeReason.DisplayOn,
+                    SystemStateChangeReason.SystemSuspending => SystemStateChangeReason.SystemResumed,
+                    SystemStateChangeReason.SessionDisconnected => SystemStateChangeReason.SessionReconnected,
+                    _ => null,
+                };
                 pendingResume = pendingResume with
                 {
                     TargetSnapshot = update(pendingResume.TargetSnapshot),
+                    CompletedReasons = pendingResume.CompletedReasons
+                        .Where(item => item != superseded).ToArray(),
                 };
+                if (pendingResume.CompletedReasons.Length == 0)
+                {
+                    pendingResume = null;
+                }
             }
             SystemStateSnapshot next = update(current.Snapshot);
-            if (next == current.Snapshot)
+            if (next == current.Snapshot &&
+                current.RequiresEnvironmentValidation == (pendingResume is not null))
             {
                 return null;
             }
 
-            current = new SystemStateChange(checked(current.Revision + 1), next, reason);
+            current = new SystemStateChange(checked(current.Revision + 1), next, reason,
+                RequiresEnvironmentValidation: pendingResume is not null);
             return current;
         }
     }
@@ -176,10 +215,12 @@ public sealed class WindowsSystemStateSource : IWindowsSystemStateSource
             {
                 completedReasons.Add(completedReason);
             }
-            pendingResume = new PendingEnvironmentResume(target, completedReasons);
+            pendingResume = new PendingEnvironmentResume(target, completedReasons.ToArray());
             current = new SystemStateChange(
                 checked(current.Revision + 1),
-                current.Snapshot,
+                requestedReason == SystemStateChangeReason.SessionReconnectRequested
+                    ? current.Snapshot with { IsSessionDisconnected = true }
+                    : current.Snapshot,
                 requestedReason,
                 RequiresEnvironmentValidation: true);
             return current;
@@ -231,5 +272,5 @@ public sealed class WindowsSystemStateSource : IWindowsSystemStateSource
 
     private sealed record PendingEnvironmentResume(
         SystemStateSnapshot TargetSnapshot,
-        IReadOnlyList<SystemStateChangeReason> CompletedReasons);
+        SystemStateChangeReason[] CompletedReasons);
 }

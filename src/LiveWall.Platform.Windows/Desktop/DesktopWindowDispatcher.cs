@@ -41,6 +41,7 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
     private nint signalWindow;
     private nint displayPowerNotification;
     private nint powerSourceNotification;
+    private nint suspendResumeNotification;
     private uint taskbarCreatedMessage;
     private bool sessionNotificationsRegistered;
     private bool accepting = true;
@@ -67,6 +68,8 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
     internal uint TaskbarCreatedMessage => taskbarCreatedMessage;
 
     internal Task Completion => stopped.Task;
+
+    internal bool SuspendResumeNotificationsRegistered => suspendResumeNotification != 0;
 
     public IAsyncEnumerable<DesktopWindowSignal> ReadSignalsAsync(
         CancellationToken cancellationToken) =>
@@ -278,12 +281,12 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
                 SystemStateNativeMethods.SessionConsoleConnect =>
                     new DesktopWindowSignal(DesktopWindowSignalKind.SessionReconnected),
                 SystemStateNativeMethods.SessionRemoteConnect =>
-                    new DesktopWindowSignal(DesktopWindowSignalKind.SessionReconnected),
+                    new DesktopWindowSignal(DesktopWindowSignalKind.SessionReconnected, Value: 1),
                 _ => null,
             };
             if (signal is not null)
             {
-                signals.Writer.TryWrite(signal);
+                signals.Writer.TryWrite(signal with { SessionId = unchecked((int)lParam.ToInt64()) });
             }
             return 0;
         }
@@ -320,6 +323,16 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
                 "Could not register the Desktop Window Dispatcher for session notifications.");
         }
         sessionNotificationsRegistered = true;
+
+        // Modern Standby/DAM suspend notifications require explicit opt-in;
+        // registering display power settings alone does not subscribe to them.
+        suspendResumeNotification = SystemStateNativeMethods.RegisterSuspendResumeNotification(
+            signalWindow, SystemStateNativeMethods.DeviceNotifyWindowHandle);
+        if (suspendResumeNotification == 0)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "Could not register for system suspend/resume notifications.");
+        }
 
         Guid displayState = SystemStateNativeMethods.ConsoleDisplayState;
         displayPowerNotification = SystemStateNativeMethods.RegisterPowerSettingNotification(
@@ -389,6 +402,11 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
     private void CleanupOnOwnerThread()
     {
         FailPendingWork(new ObjectDisposedException(nameof(DesktopWindowDispatcher)));
+        if (suspendResumeNotification != 0)
+        {
+            _ = SystemStateNativeMethods.UnregisterSuspendResumeNotification(suspendResumeNotification);
+            suspendResumeNotification = 0;
+        }
         if (powerSourceNotification != 0)
         {
             _ = SystemStateNativeMethods.UnregisterPowerSettingNotification(powerSourceNotification);
@@ -505,4 +523,5 @@ public enum DesktopWindowSignalKind
     PowerSourceChanged,
 }
 
-public sealed record DesktopWindowSignal(DesktopWindowSignalKind Kind, uint Value = 0);
+public sealed record DesktopWindowSignal(
+    DesktopWindowSignalKind Kind, uint Value = 0, int? SessionId = null);

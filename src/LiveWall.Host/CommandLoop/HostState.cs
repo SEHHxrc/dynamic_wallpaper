@@ -11,6 +11,8 @@ internal sealed class HostState
 {
     private readonly Dictionary<DisplayId, WallpaperAssignment> assignments = [];
     private readonly Dictionary<SessionId, ActiveHostSession> sessions = [];
+    private readonly Dictionary<DisplayId, (LiveWall.Domain.Wallpapers.WallpaperId Wallpaper, UserPlaybackIntent Intent)>
+        retainedPlaybackIntents = [];
 
     public long Revision { get; private set; }
 
@@ -115,7 +117,7 @@ internal sealed class HostState
         {
             sessions.Add(
                 session.Session.Id,
-                new ActiveHostSession(session, UserPlaybackIntent.Play));
+                new ActiveHostSession(session, GetRetainedPlaybackIntent(session)));
         }
 
         Revision++;
@@ -144,6 +146,10 @@ internal sealed class HostState
         foreach (ActiveHostSession target in targets)
         {
             sessions[target.Prepared.Session.Id] = target with { UserIntent = intent };
+            foreach (DisplayId display in target.Prepared.Session.Displays)
+            {
+                retainedPlaybackIntents[display] = (target.Prepared.Session.WallpaperId, intent);
+            }
         }
 
         if (targets.Length > 0)
@@ -243,11 +249,25 @@ internal sealed class HostState
         }
         foreach (PreparedSession session in prepared.Sessions)
         {
-            sessions.Add(session.Session.Id, new ActiveHostSession(session, UserPlaybackIntent.Play));
+            sessions.Add(session.Session.Id, new ActiveHostSession(session, GetRetainedPlaybackIntent(session)));
         }
         Revision++;
         return retired;
     }
+
+    private UserPlaybackIntent GetRetainedPlaybackIntent(PreparedSession session) =>
+        session.Session.Displays.Any(display =>
+            retainedPlaybackIntents.TryGetValue(display, out var retained) &&
+            retained.Wallpaper == session.Session.WallpaperId &&
+            retained.Intent == UserPlaybackIntent.Stop)
+                ? UserPlaybackIntent.Stop
+                :
+        session.Session.Displays.Any(display =>
+            retainedPlaybackIntents.TryGetValue(display, out var retained) &&
+            retained.Wallpaper == session.Session.WallpaperId &&
+            retained.Intent == UserPlaybackIntent.Pause)
+                ? UserPlaybackIntent.Pause
+                : UserPlaybackIntent.Play;
 
     public bool ReplaceRecoveredSessions(PreparedRecovery recovery)
     {

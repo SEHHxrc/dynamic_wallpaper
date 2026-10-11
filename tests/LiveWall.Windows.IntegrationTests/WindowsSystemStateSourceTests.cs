@@ -9,6 +9,62 @@ namespace LiveWall.Windows.IntegrationTests;
 public sealed class WindowsSystemStateSourceTests
 {
     [Fact]
+    public void RemoteReconnectWithoutPriorDisconnectStillRequiresPresentationValidation()
+    {
+        WindowsSystemStateSource source = CreateSource();
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionReconnected, Value: 1));
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeTrue();
+        source.Current.Snapshot.IsRemoteSession.Should().BeFalse();
+        source.CompleteEnvironmentValidation(true, source.Current.Revision);
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeFalse();
+        source.Current.Snapshot.IsRemoteSession.Should().BeTrue();
+    }
+
+    [Fact]
+    public void DisconnectReconnectDuplicatesDoNotAdvanceRevisionAndValidationIsRequired()
+    {
+        WindowsSystemStateSource source = CreateSource();
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionDisconnected));
+        long disconnected = source.Current.Revision;
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionDisconnected));
+        source.Current.Revision.Should().Be(disconnected);
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionReconnected));
+        long reconnect = source.Current.Revision;
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionReconnected));
+        source.Current.Revision.Should().Be(reconnect);
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeTrue();
+        source.CompleteEnvironmentValidation(false, reconnect);
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeTrue();
+        source.CompleteEnvironmentValidation(true, reconnect);
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeFalse();
+    }
+
+    [Fact]
+    public void EarlierReconnectValidationCannotReleaseANewerReconnect()
+    {
+        WindowsSystemStateSource source = CreateSource();
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionDisconnected));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionReconnected));
+        long stale = source.Current.Revision;
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionDisconnected));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionReconnected));
+        source.CompleteEnvironmentValidation(true, stale);
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeTrue();
+        source.CompleteEnvironmentValidation(true, source.Current.Revision);
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeFalse();
+    }
+
+    [Fact]
+    public void NotificationForAnotherSessionDoesNotChangeState()
+    {
+        WindowsSystemStateSource source = CreateSource();
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionDisconnected,
+            SessionId: System.Diagnostics.Process.GetCurrentProcess().SessionId + 1));
+        source.Current.Revision.Should().Be(1);
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeFalse();
+    }
+
+    [Fact]
     public void UnlockRemainsSuspendedUntilShellValidationSucceeds()
     {
         WindowsSystemStateSource source = CreateSource();
@@ -103,4 +159,61 @@ public sealed class WindowsSystemStateSourceTests
 
     private static WindowsSystemStateSource CreateSource() => new(
         new SystemStateSnapshot(false, false, false, false, false, false));
+
+    [Fact]
+    public void DisplayOffDoesNotLosePendingUnlockOrForcePlaybackOnValidation()
+    {
+        WindowsSystemStateSource source = CreateSource();
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionLocked));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionUnlocked));
+        source.ProcessSignal(new(DesktopWindowSignalKind.DisplayPoweredOff));
+        source.CompleteEnvironmentValidation(true);
+
+        source.Current.Snapshot.IsSessionLocked.Should().BeFalse();
+        source.Current.Snapshot.IsDisplayOff.Should().BeTrue();
+        source.Current.Reason.Should().Be(SystemStateChangeReason.SessionUnlocked);
+    }
+
+    [Fact]
+    public void RelockSupersedesUnlockButPreservesPendingSystemResume()
+    {
+        WindowsSystemStateSource source = CreateSource();
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionLocked));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SystemSuspending));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionUnlocked));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SystemResuming));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionLocked));
+        source.CompleteEnvironmentValidation(true);
+
+        source.Current.Snapshot.IsSessionLocked.Should().BeTrue();
+        source.Current.Snapshot.IsSystemSuspended.Should().BeFalse();
+        source.Current.Reason.Should().Be(SystemStateChangeReason.SystemResumed);
+    }
+
+    [Fact]
+    public void DisconnectPreservesUnrelatedPendingResumeAndRemainsInactive()
+    {
+        WindowsSystemStateSource source = CreateSource();
+        source.ProcessSignal(new(DesktopWindowSignalKind.SystemSuspending));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SystemResuming));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionDisconnected));
+        source.CompleteEnvironmentValidation(false);
+        source.Current.Snapshot.IsSystemSuspended.Should().BeTrue();
+        source.CompleteEnvironmentValidation(true);
+        source.Current.Snapshot.IsSystemSuspended.Should().BeFalse();
+        source.Current.Snapshot.IsSessionDisconnected.Should().BeTrue();
+    }
+
+    [Fact]
+    public void RelockClearsSupersededValidationEvenWhenPublishedSnapshotWasStillLocked()
+    {
+        WindowsSystemStateSource source = CreateSource();
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionLocked));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionUnlocked));
+        source.ProcessSignal(new(DesktopWindowSignalKind.SessionLocked));
+        source.Current.RequiresEnvironmentValidation.Should().BeFalse();
+        source.CompleteEnvironmentValidation(true);
+        source.Current.Snapshot.IsSessionLocked.Should().BeTrue();
+        source.Current.Reason.Should().Be(SystemStateChangeReason.SessionLocked);
+    }
 }

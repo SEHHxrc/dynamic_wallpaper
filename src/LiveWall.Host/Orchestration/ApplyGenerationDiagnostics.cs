@@ -62,6 +62,7 @@ public enum ApplyFailureReason
     CleanupFailed,
     Cancelled,
     Unexpected,
+    SessionUnavailable,
 }
 
 public sealed record ApplyTimelineEntry(

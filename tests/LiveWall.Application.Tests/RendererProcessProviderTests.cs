@@ -4,6 +4,7 @@ using LiveWall.Application.Sessions;
 using LiveWall.Contracts.RendererProtocol;
 using LiveWall.Diagnostics;
 using LiveWall.Domain.Sessions;
+using LiveWall.Domain.Playback;
 using LiveWall.Domain.Wallpapers;
 using LiveWall.Host.Orchestration;
 using LiveWall.Infrastructure.Ipc;
@@ -13,6 +14,36 @@ namespace LiveWall.Application.Tests;
 public sealed class RendererProcessProviderTests
 {
     private static readonly Lock EnvironmentGate = new();
+
+    [Fact]
+    public async Task PlaybackEvidenceComesFromPipeWritesAndReceivedProtocolFeedback()
+    {
+        using FakeRendererProcessLauncher launcher = new(FakeRendererBehavior.PlaybackFeedback);
+        RendererProcessProvider provider = CreateProvider(launcher, TimeSpan.FromSeconds(2));
+        using CancellationTokenSource budget = new(TimeSpan.FromSeconds(10));
+        await using IRendererSession session = await provider.CreateAsync(CreateContext(), budget.Token);
+        await using IAsyncEnumerator<RendererEvent> events = session.ReadEventsAsync(budget.Token)
+            .GetAsyncEnumerator();
+        await session.SendAsync(new AttachRendererSurface(1, 42,
+            new LiveWall.Domain.Displays.DisplayBounds(0, 0, 100, 100), 1), CancellationToken.None);
+        (await events.MoveNextAsync()).Should().BeTrue();
+        await session.SendAsync(new LoadRendererContent(1, CreateContext().Wallpaper, "C:\\content"), CancellationToken.None);
+        (await events.MoveNextAsync()).Should().BeTrue();
+        (await events.MoveNextAsync()).Should().BeTrue();
+
+        foreach (PlaybackState state in new[] { PlaybackState.Suspended, PlaybackState.Paused, PlaybackState.Playing })
+        {
+            await session.SendAsync(new ChangeRendererState(1, state), CancellationToken.None);
+            (await events.MoveNextAsync()).Should().BeTrue();
+            events.Current.Should().Be(new RendererPlaybackStateChanged(1, state));
+            WindowsHostEventChainDiagnostics.HasCompletedPlaybackExchange(
+                ((RendererProtocolSession)session).GetPlaybackEvidenceForDiagnostics(), state)
+                .Should().BeTrue();
+        }
+        await session.SendAsync(new ShutdownRenderer(1, "playback-test-completed"), budget.Token);
+        (await events.MoveNextAsync()).Should().BeTrue();
+        events.Current.Should().BeOfType<RendererShutdownCompleted>();
+    }
 
     [Fact]
     public async Task CreateReturnsOnlyAfterHelloInitializeAndInitialized()
@@ -270,6 +301,7 @@ public sealed class RendererProcessProviderTests
     private enum FakeRendererBehavior
     {
         CompleteHandshake,
+        PlaybackFeedback,
         InvalidToken,
         NeverConnect,
         DuplicateSurfaceEvent,
@@ -339,6 +371,45 @@ public sealed class RendererProcessProviderTests
                     RendererEventTypes.Initialized,
                     new InitializedPayload(["HwndChild"])),
                 cancellationToken).ConfigureAwait(false);
+            if (behavior == FakeRendererBehavior.PlaybackFeedback)
+            {
+                while (true)
+                {
+                    RendererEnvelope command = await channel.ReadAsync<RendererEnvelope>(cancellationToken);
+                    if (command.Type == RendererCommandTypes.Shutdown)
+                    {
+                        await channel.WriteAsync(RendererProtocolMapper.CreateEnvelope(request.SessionId,
+                            command.Generation, RendererEventTypes.ShutdownCompleted,
+                            new ShutdownCompletedPayload("test-completed")), cancellationToken);
+                        return;
+                    }
+                    if (command.Type == RendererCommandTypes.AttachSurface)
+                    {
+                        await channel.WriteAsync(RendererProtocolMapper.CreateEnvelope(request.SessionId,
+                            command.Generation, RendererEventTypes.SurfaceAttached, new SurfaceAttachedPayload(84)), cancellationToken);
+                    }
+                    else if (command.Type == RendererCommandTypes.LoadWallpaper)
+                    {
+                        await channel.WriteAsync(RendererProtocolMapper.CreateEnvelope(request.SessionId,
+                            command.Generation, RendererEventTypes.ContentLoaded, new ContentLoadedPayload("test.wallpaper")), cancellationToken);
+                        await channel.WriteAsync(RendererProtocolMapper.CreateEnvelope(request.SessionId,
+                            command.Generation, RendererEventTypes.FirstFramePresented, new FirstFramePresentedPayload(1)), cancellationToken);
+                    }
+                    else
+                    {
+                        string state = command.Type switch
+                        {
+                            RendererCommandTypes.Suspend => "Suspended",
+                            RendererCommandTypes.Pause => "Paused",
+                            RendererCommandTypes.Play => "Playing",
+                            _ => throw new InvalidOperationException("Unexpected playback command."),
+                        };
+                        await channel.WriteAsync(RendererProtocolMapper.CreateEnvelope(request.SessionId,
+                            command.Generation, RendererEventTypes.PlaybackStateChanged,
+                            new PlaybackStateChangedPayload(state, null, null)), cancellationToken);
+                    }
+                }
+            }
             if (behavior == FakeRendererBehavior.ExitAfterHandshake)
             {
                 await exitAfterHandshake.Task.WaitAsync(cancellationToken).ConfigureAwait(false);

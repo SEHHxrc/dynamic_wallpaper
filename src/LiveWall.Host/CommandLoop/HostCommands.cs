@@ -41,6 +41,15 @@ internal sealed record DisplayReconciliationFailedCommand(
 
 internal sealed record SystemStateChangedCommand(SystemStateChange Change) : HostCommand;
 
+internal sealed record SessionEnvironmentFailedCommand(
+    long SystemRevision, SessionEnvironmentFailureReason Reason) : HostCommand;
+
+internal sealed record SessionEnvironmentCompletedCommand(
+    long SystemRevision, SessionEnvironmentPath Path, bool Succeeded,
+    SessionEnvironmentFailureReason Reason = SessionEnvironmentFailureReason.None) : HostCommand;
+
+internal sealed record ContinueSessionReconnectCommand(long SystemRevision) : HostCommand;
+
 internal sealed record SetPlaybackPolicyCommand(UserPlaybackPolicy Policy) : HostCommand;
 
 internal sealed record ChangePlaybackIntentCommand(

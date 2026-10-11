@@ -36,13 +36,80 @@
 | P1.8.2 拓扑语义与 Span 布局安全 | Windows 拓扑源将运行期首个空快照暂存为 `EmptyCandidate`，相隔 350 ms 的第二个连续空快照才发布 Suspend；非空或采样失败取消候选，启动即为空使用独立初始 revision。Span 使用物理像素 union、单 Renderer 和 `scaleFactor=1`；union 与非成员显示器相交时返回强类型布局错误。Raised 竞争检测使用精确 HWND 生命周期注册表排除当前 Host 自有 Surface，不按进程名/PID 放宽 | 自动覆盖空拓扑稳定性、`2→0→2`、Span 几何/成员/失败回退和交集拒绝；Release 基线 `218/218`。实机 Span position、scale-only、`2→1→2` 及同 Host `PerDisplay→Span` 均通过。模式切换 generation 1 为 2 Session/2 Surface、generation 2 为 1 Session/1 Surface，两个 Replacement retirement 与最终 Shutdown 全部 graceful/clean | **P1.8.2 关闭。** pure bounds-only 与物理零显示器保持条件性 `EnvironmentInconclusive`；协议、DTO、Schema 和 allowlist 不变 |
 | P1.9.0 真实 Host 组合根与生命周期 | 已实现同步 `Program`、同线程单实例 Mutex、`WindowsHostCompositionRoot`、`WindowsHostRuntime` 状态机、启动恢复终态等待、启动后环境补采、幂等 Shutdown 和反序释放。Restore 先载入完整持久 Assignment，再只 Apply 在线显示器；失败恢复或离线显示器不会在关停持久化时丢失。Stopping 后拒绝外部变更，迟到 prepared completion 只能终态化并清理 provisional 资源 | 自动覆盖重复 Shutdown、停止后 Apply/拓扑/Explorer 拒绝、FirstFrame 后迟到完成零 Replace、完整 Assignment 保存、Runtime 启停/补采/持久化/一次性释放；随 P1.9.1 合并后的 Debug/Release 总基线为 `224/224`。Release 正式组合根 `--validate-startup` 返回 0 并生成 schema v1 配置 | **生命周期骨架与停止门禁完成。** 生产壁纸仓库和 Video/Web Renderer 产品入口仍未实现，默认组合根只允许加载/保留 Assignment 并失败关闭内容恢复；P1.9.2–P1.9.5 尚未完成，Stage B 与 allowlist 不变 |
 | P1.9.1 `TaskbarCreated` 门禁与真实事件链恢复 | 已实现内部 Explorer 监视端口、350 ms 验证与 2 秒后备链路、验证/转发失败强类型结果、Stopping 丢弃分类，以及只供诊断组合根使用的真实隐藏窗口信号注入和 Explorer 重启入口；默认 `LiveWall.Host` 不暴露实验开关 | 自动覆盖 10 次 burst 严格 No-op、验证异常、fallback outage 去重、真实 Bridge 转发、关停后丢弃和 Dispose 后零投递；Debug/Release 总基线 `224/224`。`26200.9457 / WinSta0\Default` 双屏 No-op 得到 `10 raw / 0 validated changes / 0 recovery / 0 Replace`。真实 Explorer PID `11908→37580` 后得到 `1 raw / 1 validated change / 1 recovery / 1 Replace / 0 duplicate`、终态 `Succeeded + Rebuilt`，退出码 0且无自有 HWND；人工确认两屏同步黑屏、Shell 恢复、同步橙色并还原，全程无半屏或覆盖 | **P1.9.1 关闭。** 本次为整批 `Rebuilt`，不能记作同 Renderer `Reattached`；黑屏属于显式终止 Explorer 的允许窗口。P1.9.2–P1.9.5、生产内容入口和 Shell mutation 策略仍未完成，Stage B 与两类生产 allowlist 不变 |
-| P1.9.2 系统锁定、显示电源与睡眠恢复 | 已实现 `ISystemStateSource`、完整 `SystemStateChange`、单调 revision/reason、Windows WTS/Power 广播聚合、64 项有界 journal 和 Host 单写者 stale revision 拒绝。锁定/显示关闭/系统 suspend 立即暂停；解锁/点亮/唤醒先保留暂停状态，同步刷新拓扑并等待 350 ms Shell 验证成功后才恢复。Apply、拓扑提交及 Explorer Reattach/Rebuild 后都会重新应用当前策略 | Debug/Release `235/235`。自动覆盖锁屏、显示关闭、睡眠、重复和交叠恢复、Shell unavailable 时不恢复、旧 revision、锁屏期间 Apply 提交仍为 Suspended、Stopping 后事件丢弃，以及恢复后 Session identity/策略状态；Renderer Protocol/DTO/Schema 未修改。新增 `--raised-desktop-host-session-lock` 与 `--raised-desktop-host-sleep-resume`，工具本身不会锁屏或发起睡眠 | **代码与自动门禁完成，实机待验收。** 需分别确认锁屏/解锁和睡眠/恢复的真实 WTS/Power 事件、Session/Renderer 身份保持、零 Replace/retirement、层级与清理；P1.9.3 的 RDP/快速用户切换仍独立未完成 |
+| P1.9.2 系统锁定、显示电源与睡眠恢复 | 已实现完整状态源、单调 revision、WTS/Power 聚合及显式 suspend/resume 通知注册/释放；解锁、点亮和唤醒验证环境后才恢复完整播放策略 | P1.9.2 修复基线 Debug/Release `246/246`，随 P1.9.3.0 最新整体基线 `262/262`。物理单屏基线、锁解 3/3、用户暂停锁解 1/1、S0 Modern Standby 睡眠恢复 2/2 通过，实际命令/回执及清理完整；首个未完成睡眠样本保留 | **自动及物理单屏代表场景通过；双屏系统恢复待补。** 不宣称 P1.9.2 全部关闭，不代表 RDP/用户切换或 Video/Web 动态帧循环通过 |
+| P1.9.3.0 会话状态机与正式事件链 | 已实现 Session 匹配、断开提交门禁、准备取消、最新环境延后处理、revision 关联验证、独立验证预算及可等待会话环境终态 | Debug/Release `262/262`；自动覆盖重复、抢占、迟到结果、Shell/拓扑延后处理、FirstFrame 后零提交、暂停意图、失败/超时、Stopping、恢复取消及离线 Assignment | **本代码/自动切片完成；真实会话实机未验收。** 后续 P1.9.3.1 才进行 RDP/用户切换诊断与人工实验，协议和 allowlist 不变 |
 | Platform.Windows attachment lease | 已实现 | 自动验证 Platform 内部 parent/anchor/backdrop/generation、无句柄能力描述及跨 generation 旧 HWND 不再被显隐/复用 | Shell HWND/PID 不进入 Application、Renderer、持久化或 allowlist；每个新 generation 必须重新发现 |
 | Raised Desktop Surface Factory | 已实现生产形态接线 | 受控 HWND 测试验证 hidden provisional、`WS_EX_NOREDIRECTIONBITMAP`、`DefView > LiveWall > WorkerW`、显式批量激活和清理 | 只消费当前 generation 的内部 lease；不等于当前 build 已获生产支持 |
 | Raised Desktop 生产适配 | 已实现发现和 Factory 调用路径，但 allowlist 关闭 | 自动结构/Factory 契约通过；尚未进行允许生产选择后的完整真实矩阵 | `ValidatedBuilds` 为空，生产 Selector 跳过；不得由诊断成功自动写入 allowlist |
 | 产品入口与完整运行链路 | 已增加显式单次、soak、process-cold 批次、同 Host 循环和真实拓扑变化入口，均复用 HostCommandLoop、SessionCoordinator、生产 Surface Factory 与正式 RendererProtocolSession | 物理单屏、`26200.9168` 双屏 P1.6/P1.7，以及 `26200.9445` 双屏断开/重连、快速抢占和主屏切换通过 | 当前入口仍只用于显式诊断；剩余 DPI/bounds、会话和 Shell mutation 矩阵完成前不改变 allowlist 或 Stage B 状态；首次历史样本不得事后定性 |
 
 因此 Stage B 的总体状态仍为 **`In progress / Not accepted`**。已经完成的机制不应再描述为“尚未实现”，但自动测试结果也不能替代真实桌面兼容性结论。
+
+### P1.9.3.1 真实会话诊断入口（2026-10-11）
+
+首版范围决定：**RDP 实机为 `OutOfScope / WaivedForV1`，不支持远程桌面动态壁纸呈现，不再阻塞首版或 P1.9.4。** 这是范围豁免，不是测试通过。通用会话状态机、WTS 事件、暂停/失败关闭策略和显式诊断入口保留；本地快速用户切换实机仍为 `NotValidated`，有现成安全环境时补测，不创建账户或更改远程服务来获取样本。
+
+已实现 `--raised-desktop-host-session-reconnect`，复用正式 Host Runtime 和事件桥，等待与 reconnect revision 匹配的会话环境终态；不通过轮询 Session 数量推断恢复完成。armed 后人工预算独立为十分钟，工具不主动断开、切换用户、注销或配置 RDP。通知、验证终态、恢复路径、实际 Renderer 播放回执及清理结果可保存 JSON；锁屏、错误 Session、倒序通知、未知路径或失败终态不能作为成功样本。异常保留 failure phase、已获得的验证终态与通知，不假定清理成功。
+
+该入口完成时的 Debug/Release 自动基线为 `277/277`，Release 工具零警告/错误，架构边界检查通过。**入口和自动证据门禁完成；真实会话样本未执行，不能写为实机通过。** 本机 `26200.9457 / EditionID=CoreCountrySpecific`；RDP 按首版范围豁免，本地用户切换保留 `NotValidated`，不再要求先取得 RDP 样本才推进 P1.9.4。所有人工实验仍需显式授权。P1.9.2 双屏系统恢复独立待补；协议、Schema、两个生产 allowlist 和 Stage B 状态不变。
+
+### P1.9.4-A Shell 抢占未提交准备（2026-10-11）
+
+确认 Shell generation 改变后，Host 立即取消尚未终态的 Apply preparation，并将进行中的拓扑 reconciliation 终态化为 `Cancelled/Superseded`；Shell 恢复使用最新已接受拓扑。自动覆盖普通 Apply 和拓扑准备已经完成 FirstFrame、内部完成尚未投递时的抢占：取消终态立即可等待；恢复完成后迟到 provisional 结果只能清理，不能 Replace 或改变已提交 Session/Assignment。
+
+此项只是 P1.9.4 的第一条自动边界，不等价于完整环境恢复仲裁。反向顺序（Shell 恢复中接受新 topology revision）、NoChange/Suspend 抢占、旧恢复终态与新事务隔离、恢复期重复信号及真实并发实验仍待收口。未执行 Explorer 或显示变化实机实验。
+
+本次 Debug/Release 全量自动基线 `279/279`（新增两条受控的 FirstFrame 后迟到结果测试），Release 诊断工具构建及架构边界检查通过；不修改 Renderer Protocol v1、DTO/Schema 或生产 allowlist。
+
+### P1.9.4-C 显式并发诊断入口（2026-10-11）
+
+已实现 `--raised-desktop-host-environment-recovery`，必须同时指定 `--confirm-display-change` 和 `--confirm-explorer-restart`。复用正式 Runtime、事件桥、拓扑发布源和 Host recovery/reconciliation 终态，不直接投递 Explorer 恢复命令。`ENVIRONMENT_RECOVERY_ARMED` 后给用户独立的 180 秒手动改变一次缩放；只有拓扑 preparation 仍在途才显式重启 Explorer 一次，不自动重试 Shell mutation。
+
+真实重叠需同时证明：重启前 topology terminal 未完成、该 revision 被 confirmed Shell generation 以 `Cancelled/Superseded` 抢占、一个恢复事务成功且只有一次 Replace、最终已观察 revision 与活动 Surface 几何一致。成功的串行样本记 `EnvironmentInconclusive`（退出码 9），不算并发通过；采集溢出为 `HarnessFailure`，超时/异常保存阶段和原因为 `DiagnosticIncomplete`，外部取消为 `Cancelled`，不伪造清理证据。结果记录逐 revision 和 recovery 时间线、Session retirement、Renderer 实际退出与句柄释放、自有 Surface 清理、执行上下文及 Shell WorkerW 增量；不持久化认证令牌、Pipe 名称或 Shell HWND/PID。
+
+新增 15 条纯合成证据/进程清理测试，Debug/Release 全量基线均为 **302/302**，Release 工具零警告/错误，架构边界及差异检查通过。**代码与自动门禁完成，实机尚未执行，P1.9.4 未关闭。** 人工实验须另行确认，预期恢复后仍为橙色，不以黄色出现为通过条件。Renderer Protocol v1、DTO、Schema、默认产品入口、两个生产 allowlist 和 Stage B 状态保持不变。
+
+### P1.9.4-B Shell/display 共享恢复仲裁（2026-10-11）
+
+已接通反向顺序：Shell 恢复进行中接受新 topology revision，只保存最新拓扑并取消旧 reattach、rebuild preparation 或退避；不对旧 Shell Surface 做活动 resize，不另起部分显示器替换。所有合并 revision 均有可等待 reconciliation terminal，中间 revision 为 `Cancelled/Superseded`；最新 revision 与共享 recovery 终态关联，成功重建后记录一次真实 Replace，零显示器 Suspend 不伪造 Replace。
+
+单独看属于 NoChange 的拓扑，在 Shell 已失效时仍按 Reconfigure 收口，不能保留旧 Shell HWND。空显示器按 Suspend，保留 Assignment、不启动新 Renderer，原 DisplayId 返回后走既有恢复规划。旧准备完成结果用不可取消的内部投递交给单写者清理，后台阶段记录绑定原 recovery operation；迟到 retry/failure 不得终态化较新 attempt。被新拓扑取消的旧 rebuild 明确记录 `Cancelled/Superseded`，全批清理后再准备最新计划；布局拒绝有明确失败终态。
+
+新增自动覆盖：reattach 首帧后遇到同布局/几何变化/零显示器及多 revision、准备好的 rebuild 被抢占、在途 rebuild 取消和迟到重试/失败、双屏两首帧屏障与暂停意图、合并事务关停、合并后重建耗尽预算失败关闭。**此为代码与受控自动证据，不是实机验收；P1.9.4 尚未关闭。** 下一步 P1.9.4-C 需独立的显式并发实机诊断与用户授权，观察真实 Explorer/显示事件交错、最终全屏覆盖、层级和资源/Shell 清理。P1.9.5 完整退出矩阵也未被本轮一条 Shutdown 测试替代。
+
+本轮新增 8 条自动样本，Debug/Release 最新全量基线均为 `287/287`；Release 诊断工具零警告/错误，10 个项目的架构边界及 `git diff --check` 通过。没有修改协议 v1、DTO/Schema、生产 allowlist 或默认产品入口；没有执行真实 Explorer/显示变更。
+
+### P1.9.3.0 会话状态机、正式事件接线与自动门禁（2026-10-11）
+
+代码与自动门禁通过，Debug/Release 最新基线 `262/262`；该切片不包括真实 RDP 或快速用户切换。P1.9.2 单屏代表场景保持通过，双屏系统恢复独立待补。
+
+- 原生 WTS 保留通知 SessionId，事件桥记录有界会话序号、当前 Session 匹配结果、系统 revision 与单调耗时；非当前 Session 不进入本 Host 状态。
+- 断开立即 Suspend 并取消未提交 Apply/reconciliation/recovery；所有 prepared 提交入口重新检查会话及被取消 generation，FirstFrame 后迟到批次也不能 Replace。已提交 Assignment 和用户暂停意图保留。
+- 断开期间只保存最新拓扑与 Shell 变化；验证通过后稳定环境走 Resume，几何变化走 Reconfigure，Shell 失效或无有效 Session 走完整 Rebuild。断开中被取消的恢复先完成 abandon，再创建新会话，不复用旧 HWND。离线 Assignment 不迁移到陌生 DisplayId。
+- Shell 验证成功和异常都携带请求 revision；再次断开立即取消本次可等待终态，旧成功/失败均不能放行新重连。重连验证预算为独立 10 秒，异常/超时输出强类型 Failed，保持暂停；Shutdown/Dispose 输出 Cancelled。
+- Host 内部 `WaitForSessionEnvironmentAsync` 返回有界保留的验证终态、Resume/Reconfigure/Rebuild 路径、强类型原因和单调耗时；Reconfigure/Rebuild 关联既有事务终态，不轮询 Session 数量。默认生产事件输入继续开启，自动状态机测试隔离真实电源通知，防止实机初始通知污染合成事件顺序。
+
+新增自动覆盖重复通知、重连中再断开、迟到成功和失败、断开期间 Shell 变化/拓扑 churn、FirstFrame 后禁止提交、验证异常/超时、暂停意图、非当前 Session、Stopping、恢复准备取消、refresh-only 恢复和陌生显示器不继承。Renderer Protocol v1、DTO/Schema、两个生产 allowlist 均未修改；Stage B 保持 `In progress / Not accepted`。下一实机切片为 P1.9.3.1，仍需用户授权和逐步操作标记。
+
+### P1.9.2 验收证据补强（2026-10-11）
+
+第二个有效单屏睡眠样本通过：`artifacts/diagnostics/p1.9.2-single-sleep-resume-20261011-03.json` 为 ValidSuccess、退出码 0，完整 suspend/resume、显示电源和锁解事件齐备；仍锁定/显示关闭时保持暂停，全部恢复条件满足后才 Play，实际写入及独立回执通过。generation `1→1`、Replace `1→1`、运行中 retirement `0→0`、Session/Renderer identity 保持，无额外 recovery/reconciliation。正常退休 25.6720 ms、issues 为空、全部资源清理，无自有 HWND，直属 WorkerW `1→1`、新增 0。用户观察登录后约 3 秒还原，其余正常。**最新状态：自动门禁及物理单屏代表场景通过（基线、锁解 3/3、用户暂停锁解 1/1、睡眠恢复 2/2）；双屏系统恢复待补测，P1.9.2 整体不宣称全部关闭。** 首个未完成样本保留；P1.9.3.0 可继续开发，不升级协议或开放生产 allowlist。
+
+睡眠通知订阅修复后的首个物理单屏样本通过：结果 `artifacts/diagnostics/p1.9.2-single-sleep-resume-20261011-02.json` 为 `ValidSuccess`，退出码 0；真实 SystemSuspending/SystemResumed、显示电源及锁解事件齐备，恢复后在显示关闭/仍锁定阶段继续 Suspend，最终环境验证和解锁完成后才 Play，实际写入及独立回执验证通过。generation `1→1`、Replace `1→1`、运行中 retirement `0→0`、Session/Renderer identity 保持，无额外 recovery/reconciliation。正常退休 25.7830 ms、所有清理项通过、issues 为空，无自有 HWND，直属 WorkerW `1→1`、新增 0。用户观察“重新登陆后还是3秒左右就还原了，其他仍然正常”，不记作可见满 5 秒。最新有效睡眠样本 `1/2`，原 -01 未完成样本保留；双屏系统恢复待补测，不能因此关闭全部 P1.9.2 或接受 Stage B。
+
+单屏睡眠恢复第一个样本未完成：用户实际选择睡眠，S0 Modern Standby 能力及 Kernel-Power 506/507 日志确认进入/退出待机；探针超时，退出码 1，分类 `TransitionIncomplete`、清理验证 `Unavailable`，不记作通过。用户观察唤醒登录后橙色保持较久，其余层级正常。原始结果 `artifacts/diagnostics/p1.9.2-single-sleep-resume-20261011-01.json` 保留。代码发现缺少显式 suspend/resume 通知订阅，已补充注册/释放及生命周期测试；Debug/Release 均为 `246/246`，Release 诊断构建零警告/错误，架构边界通过。订阅修复仍待独立实机复测，不认定为全部异常的唯一原因，不改变 Windows 电源设置。最新状态：单屏基线、普通锁解 3/3、用户暂停锁解 1/1 通过；睡眠有效通过样本仍为 0/2，双屏系统恢复待补测。协议、Schema、生产 allowlist 与 Stage B 状态不变。
+
+物理单屏用户暂停→锁屏→解锁 `1/1` 通过：锁屏前实际 Pause/Paused，锁屏中 Suspend/Suspended，解锁验证后实际再次 Pause/Paused、策略原因 UserRequest，未发送解锁后的 Play；`userPausePreserved=True`。generation、Session/Renderer identity 和活动 Surface 保持，无额外 Replace/恢复事务。正常退休 27.9745 ms，issues 为空，无自有 HWND或新增直属 WorkerW，退出码 0。用户观察与普通锁解相同：“都是重新登陆后3秒左右还原原壁纸”；静态色块无自主渲染循环，外观相同不作为暂停证据，此项以真实 Pipe 写入及独立回执验收，不等于 Video/Web 动态帧循环已验证。结果 `artifacts/diagnostics/p1.9.2-single-user-pause-lock-unlock-20261011-01.json`。单屏基线、普通锁解 3/3、用户暂停锁解 1/1 已通过；睡眠恢复 0/2 和双屏系统恢复仍待验收。
+
+物理单屏正常锁屏/解锁 `3/3` 通过。第 3 轮真实事件与前两轮一致，实际 Suspend/Suspended、验证后 Play/Playing 齐备，generation `1→1`、Replace `1→1`、运行中 retirement `0→0`、Session/Renderer identity 保持，未触发恢复或拓扑重规划。最后正常退休 28.1993 ms、全部清理项通过、issues 为空，无自有 HWND，新增直属 WorkerW 为 0，退出码 0。用户观察“和上次一样，3秒左右恢复原壁纸”，不将其写作可见满 5 秒。独立结果 `artifacts/diagnostics/p1.9.2-single-lock-unlock-20261011-03.json`。该结论只关闭单屏正常锁解三轮；用户暂停锁解、两轮睡眠恢复与双屏系统恢复尚未验收。
+
+物理单屏锁屏/解锁第 2 轮通过：`SessionLocked → SessionUnlockRequested → SessionUnlocked`，Suspend/Suspended 与验证后 Play/Playing 的实际协议证据齐备；generation `1→1`、Replace `1→1`、运行中 retirement `0→0`、Session/Renderer 身份保持。最终正常 Shutdown/Dispose/Surface cleanup，issues 为空，无自有 HWND，新增直属 WorkerW 为 0，退出码 0。用户再次观察“重新登陆后两三秒左右恢复原壁纸”，保留为实际可见时长，不记作可见满 5 秒。独立结果 `artifacts/diagnostics/p1.9.2-single-lock-unlock-20261011-02.json`；锁解累计 `2/3`，用户暂停锁解、睡眠与双屏系统恢复仍待验收。
+
+物理单屏锁屏/解锁第 1 轮通过：真实系统事件为 `SessionLocked → SessionUnlockRequested → SessionUnlocked`，实际发送 Suspend 并收到 Suspended 回执；验证后发送 Play 并收到 Playing 回执。Host generation `1→1`、Replace `1→1`、运行中 retirement `0→0`，Session/Renderer 身份保持；正常退出 retirement 27.5545 ms、全部清理项通过，issues 为空，无自有 HWND/新增直属 WorkerW，退出码 0。用户观察为“锁屏后打开仍然是橙色，过两秒左右恢复”；该约 2 秒是人工可见时长，不改写为实测 5 秒。独立结果 `artifacts/diagnostics/p1.9.2-single-lock-unlock-20261011-01.json`。锁解累计 `1/3`；用户暂停锁解、睡眠及双屏系统恢复尚未验收。
+
+单屏启动/退出基线已完成：`26200.9457 / session=7 / WinSta0\Default / 2880×1800@200%`，5 秒 primary 候选首帧约 1097.588 ms、Replace 约 1118.598 ms，终态 Succeeded、退出码 0；retirement 34.631 ms，ShutdownSent/ShutdownCompleted/RendererDisposed/SurfacesCleaned 全部为 True、issues 为空，无 LiveWall HWND，直属 Shell WorkerW 前后均为 1且无新增。用户确认完整橙色、图标/任务栏/普通窗口层级及正常还原均无异常。结果文件为 `artifacts/diagnostics/p1.9.2-single-baseline-20261011-01.json`；该项自动与人工通过，不代表锁屏、睡眠或双屏系统恢复已验收。
+
+在原 `235/235` 基线上补齐播放策略决定、实际 Pipe 写入与独立 Renderer 回执的有界 journal，测试 Renderer 支持 Play/Resume/Pause/Suspend；静态色块不作为暂停证据。修正不同系统状态相互取消待恢复事实的边界，以及 Renderer 退出先于最后 ShutdownCompleted 接收的竞态。最新 Debug/Release 均为 `245/245`。诊断支持逐样本 JSON、用户暂停锁解，睡眠环境变化等待恢复/重规划终态。代码与自动门禁通过；物理单屏基线、锁解三轮、用户暂停锁解一轮和睡眠两轮仍待验收，双屏系统恢复待补测。P1.9.3.0 会话状态机开发不以双屏可用为前置；协议 v1、DTO/Schema、两个生产 allowlist 不变。
 
 2026-09-14 旋转补充状态：纵屏→横屏最终 `Reconfigure`、黄色全覆盖、外接屏保持、层级与清理均通过，但新几何提交前主屏右侧短暂露出静态壁纸，因此旧实现的旋转连续性为 `TransientCoverageGap`。代码随后在 provisional preparation 前通过协议 v1 `SetBounds` resize 旧 Renderer child/swap chain、重建 RTV 并重绘最后一帧，再 resize 旧活动 Host Surface；快速 revision 回到原布局时也会恢复活动几何。修复后的横屏→纵屏实机复测中，主屏橙色过渡完整、未再露出静态壁纸，保留更改后完整变黄；外接屏始终保持橙色，最终两屏一起恢复。自动结果为 `Reconfigure/Succeeded`、`ActiveSurfacesResized=Success`、一次 Replace、只退休主屏旧 Session、`valid/finalGraceful/finalClean=True` 且无 HWND 残留。完整基线仍为 198/198；反向纵屏→横屏尚待同修复版本复测。
 

@@ -18,6 +18,11 @@ namespace LiveWall.DesktopHostDiagnostics;
 internal static class Program
 {
     private const int DefaultColorBlockSeconds = 10;
+    private static readonly JsonSerializerOptions SystemTransitionJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
     private const int MaximumColorBlockSeconds = 30;
     private const int MaximumProductCandidateSoakSeconds = 3600;
     private const int ShellUnavailableExitCode = 3;
@@ -60,8 +65,10 @@ internal static class Program
                 options.ProductCandidateTopologyChurnEnabled ||
                 options.HostTaskbarNoopEnabled ||
                 options.HostExplorerEventRecoveryEnabled ||
+                options.HostEnvironmentRecoveryEnabled ||
                 options.HostSessionLockEnabled ||
                 options.HostSleepResumeEnabled ||
+                options.HostSessionReconnectEnabled ||
                 options.TransitionGuardProbeEnabled)
             {
                 return await RunRaisedDesktopDiagnosticAsync(
@@ -427,7 +434,13 @@ internal static class Program
                     .ConfigureAwait(false);
             }
 
-            if (options.HostSessionLockEnabled || options.HostSleepResumeEnabled)
+            if (options.HostEnvironmentRecoveryEnabled)
+            {
+                return await RunHostEnvironmentRecoveryAsync(topology, options.DurationSeconds,
+                    options.TargetDisplay, options.ResultJsonPath, cancellation.Token).ConfigureAwait(false);
+            }
+
+            if (options.HostSessionLockEnabled || options.HostSleepResumeEnabled || options.HostSessionReconnectEnabled)
             {
                 return await RunHostSystemTransitionAsync(
                         topology,
@@ -435,7 +448,11 @@ internal static class Program
                         options.TargetDisplay,
                         options.HostSessionLockEnabled
                             ? WindowsHostSystemTransitionKind.SessionLock
-                            : WindowsHostSystemTransitionKind.SleepResume,
+                            : options.HostSessionReconnectEnabled
+                                ? WindowsHostSystemTransitionKind.SessionReconnect
+                                : WindowsHostSystemTransitionKind.SleepResume,
+                        options.PauseBeforeTransition,
+                        options.ResultJsonPath,
                         cancellation.Token)
                     .ConfigureAwait(false);
             }
@@ -936,11 +953,137 @@ internal static class Program
         return valid ? 0 : ExplorerRecoveryFailedExitCode;
     }
 
+    private static async Task<int> RunHostEnvironmentRecoveryAsync(
+        DisplayTopology topology, int durationSeconds, string targetDisplay,
+        string? resultJsonPath, CancellationToken cancellationToken)
+    {
+        ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        PrintShellTopology(before);
+        Guid runId = Guid.NewGuid();
+        ShellTopologySnapshot? oldActive = null;
+        ShellTopologySnapshot? newShell = null;
+        WindowsHostEnvironmentRecoveryResult? result = null;
+        string classification;
+        string? failurePhase = null;
+        string? failureType = null;
+        try
+        {
+            result = await WindowsHostEventChainDiagnostics.RunEnvironmentRecoveryAsync(new(
+                FindRendererChildExecutable(), topology, ParseProductCandidateDisplaySelection(targetDisplay),
+                TimeSpan.FromMinutes(3), TimeSpan.FromSeconds(durationSeconds), async token =>
+                {
+                    oldActive = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+                    ShellWindowFingerprint oldProgman = FindProgman(oldActive);
+                    await RestartExplorerAsync(oldProgman.ProcessId, token).ConfigureAwait(false);
+                    newShell = await WaitForNewShellGenerationAsync(oldActive.ShellWindowHandle,
+                        oldProgman.ProcessId, token).ConfigureAwait(false);
+                },
+                Armed: () => Console.WriteLine("ENVIRONMENT_RECOVERY_ARMED: Orange is active. " +
+                    "You have 180 seconds to manually change ONE selected display's scale and keep the change. " +
+                    "Do not unplug, rotate, lock, sleep, or make a second change. " +
+                    "Explorer will restart ONCE only if topology preparation is still pending."),
+                Restarting: () => Console.WriteLine("ENVIRONMENT_RECOVERY_RESTARTING: " +
+                    "Topology preparation is pending; explicitly restarting Explorer now. " +
+                    "A brief black desktop and returning icons/taskbar are expected. " +
+                    "Wait for orange to return; do not change settings again.")), cancellationToken).ConfigureAwait(false);
+            classification = result.Classification.ToString();
+        }
+        catch (EnvironmentRecoveryDiagnosticException exception)
+        {
+            failurePhase = exception.Phase;
+            failureType = exception.InnerException?.GetType().Name;
+            classification = cancellationToken.IsCancellationRequested ? "Cancelled" :
+                exception.Phase == "AwaitingTopologyChange" && exception.InnerException is OperationCanceledException
+                    ? "EnvironmentInconclusive" : "DiagnosticIncomplete";
+            Console.WriteLine($"ENVIRONMENT_RECOVERY_INCOMPLETE phase={failurePhase} | type={failureType}.");
+        }
+        ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+        Console.WriteLine("=== Environment recovery: After cleanup ===");
+        PrintShellTopology(after);
+        bool shellGenerationChanged = oldActive is not null && newShell is not null &&
+            oldActive.ShellWindowHandle != newShell.ShellWindowHandle &&
+            FindProgman(oldActive).ProcessId != FindProgman(newShell).ProcessId;
+        bool contextValid = before.ExecutionContext.SessionId is not null &&
+            before.ExecutionContext == after.ExecutionContext &&
+            string.Equals(after.ExecutionContext.WindowStationName, "WinSta0", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(after.ExecutionContext.DesktopName, "Default", StringComparison.OrdinalIgnoreCase);
+        bool ownedWindowsRemain = HasLiveWallOwnedWindows(after);
+        int addedWorkerCount = Math.Max(0, DirectShellWorkers(after).Count - DirectShellWorkers(before).Count);
+        if (result is not null && (ownedWindowsRemain || addedWorkerCount != 0 || !contextValid ||
+            result.ExplorerRestartInvoked && !shellGenerationChanged)) classification = "ProductFailure";
+        Console.WriteLine($"HOST_ENVIRONMENT_RECOVERY classification={classification} | " +
+            $"overlapProven={result?.OverlapProven} | shellGenerationChanged={shellGenerationChanged} | " +
+            $"replaceCount={result?.BatchReplaceCount} | finalRevisionValidated={result?.FinalRevisionValidated} | " +
+            $"ownedWindowsRemain={ownedWindowsRemain} | addedWorkerCount={addedWorkerCount}.");
+        if (resultJsonPath is not null)
+        {
+            string absolutePath = Path.GetFullPath(resultJsonPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(absolutePath)!);
+            await File.WriteAllTextAsync(absolutePath, JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1, runId, recordedAt = DateTimeOffset.UtcNow, classification,
+                fullBuild = WindowsShellTopologyDiagnostics.CaptureBuildIdentity().FullBuild,
+                executionContext = before.ExecutionContext, executionContextAfter = after.ExecutionContext,
+                shellGenerationChanged, addedWorkerCount, ownedWindowsRemain,
+                shellMutationRecovery = addedWorkerCount == 0 ? "NoAdditionalWorkerObserved" : "CleanupIncomplete",
+                failurePhase, failureType, result,
+            }, SystemTransitionJsonOptions), CancellationToken.None).ConfigureAwait(false);
+            Console.WriteLine($"Structured result: {absolutePath}");
+        }
+        // 9 is deliberately distinct from both success and product failure: no overlap sample.
+        return classification == "ValidSuccess" ? 0 :
+            classification == "EnvironmentInconclusive" ? 9 : ExplorerRecoveryFailedExitCode;
+    }
+
     private static async Task<int> RunHostSystemTransitionAsync(
         DisplayTopology topology,
         int durationSeconds,
         string targetDisplay,
         WindowsHostSystemTransitionKind transitionKind,
+        bool pauseBeforeTransition,
+        string? resultJsonPath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunHostSystemTransitionCoreAsync(topology, durationSeconds, targetDisplay,
+                transitionKind, pauseBeforeTransition, resultJsonPath, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            if (resultJsonPath is not null)
+            {
+                string absolutePath = Path.GetFullPath(resultJsonPath);
+                Directory.CreateDirectory(Path.GetDirectoryName(absolutePath)!);
+                await File.WriteAllTextAsync(absolutePath, JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    runId = Guid.NewGuid().ToString("N"),
+                    recordedAt = DateTimeOffset.UtcNow,
+                    classification = cancellationToken.IsCancellationRequested ? "Cancelled" :
+                        exception is SystemTransitionDiagnosticException { SessionReconnect: not null }
+                            ? "ProductFailure" : "TransitionIncomplete",
+                    transitionKind,
+                    pauseBeforeTransition,
+                    failureType = exception.GetType().Name,
+                    failurePhase = (exception as SystemTransitionDiagnosticException)?.Phase,
+                    sessionReconnect = (exception as SystemTransitionDiagnosticException)?.SessionReconnect,
+                    sessionNotifications = (exception as SystemTransitionDiagnosticException)?.Notifications,
+                    cleanupVerification = "Unavailable",
+                }, SystemTransitionJsonOptions), CancellationToken.None).ConfigureAwait(false);
+            }
+            throw;
+        }
+    }
+
+    private static async Task<int> RunHostSystemTransitionCoreAsync(
+        DisplayTopology topology,
+        int durationSeconds,
+        string targetDisplay,
+        WindowsHostSystemTransitionKind transitionKind,
+        bool pauseBeforeTransition,
+        string? resultJsonPath,
         CancellationToken cancellationToken)
     {
         ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
@@ -955,14 +1098,21 @@ internal static class Program
                         topology,
                         selection,
                         transitionKind,
-                        TimeSpan.FromMinutes(3),
+                        transitionKind == WindowsHostSystemTransitionKind.SessionReconnect
+                            ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(3),
                         TimeSpan.FromSeconds(durationSeconds),
                         () => Console.WriteLine(transitionKind ==
                                 WindowsHostSystemTransitionKind.SessionLock
                             ? "SYSTEM_TRANSITION_ARMED: lock Windows now, then unlock and " +
                                 "return within three minutes. LiveWall will not lock it for you."
+                            : transitionKind == WindowsHostSystemTransitionKind.SessionReconnect
+                                ? "SESSION_RECONNECT_ARMED: manually disconnect this Windows session using " +
+                                    "the agreed RDP/session-switch method, then return to the SAME user and " +
+                                    "session within ten minutes. Lock/unlock alone is NOT a disconnect sample. " +
+                                    "LiveWall will not disconnect, switch users, or enable RDP for you."
                             : "SYSTEM_TRANSITION_ARMED: put Windows to sleep now, then wake " +
-                                "and sign in within three minutes. LiveWall will not initiate sleep.")),
+                                "and sign in within three minutes. LiveWall will not initiate sleep."),
+                        PauseBeforeTransition: pauseBeforeTransition),
                     cancellationToken)
                 .ConfigureAwait(false);
         ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
@@ -972,12 +1122,34 @@ internal static class Program
         bool timelineValid = result.SystemStateTimeline.Any(change =>
                 change.RequiresEnvironmentValidation) &&
             result.SystemStateTimeline[^1].RequiresEnvironmentValidation == false;
-        bool valid = result.SuspendedObserved && result.ResumedObserved &&
-            result.InitialGeneration == result.FinalGeneration &&
+        int addedWorkerCount = result.Recovery.Count == 0
+            ? DirectShellWorkers(after).Except(DirectShellWorkers(before)).Count()
+            : Math.Max(0, DirectShellWorkers(after).Count - DirectShellWorkers(before).Count);
+        bool stableEnvironment = result.Recovery.Count == 0 && result.Reconciliation is null;
+        bool environmentValid = stableEnvironment
+            ? result.InitialGeneration == result.FinalGeneration &&
             result.InitialReplaceCount == result.FinalReplaceCount &&
             result.InitialRetirementCount == result.FinalRetirementCount &&
-            result.SessionIdentityPreserved && timelineValid &&
-            result.OwnedResourcesCleaned && !ownedWindowsRemain;
+            result.SessionIdentityPreserved
+            : (transitionKind == WindowsHostSystemTransitionKind.SleepResume ||
+                transitionKind == WindowsHostSystemTransitionKind.SessionReconnect) &&
+                result.Recovery.All(item => item.TerminalState == DesktopRecoveryTerminalState.Succeeded) &&
+                (result.Reconciliation is null || result.Reconciliation.TerminalState == DisplayReconciliationTerminalState.Succeeded);
+        bool reconnectValid = transitionKind != WindowsHostSystemTransitionKind.SessionReconnect ||
+            WindowsHostEventChainDiagnostics.HasValidatedSessionReconnect(
+                result.SessionReconnect, result.SessionNotifications) &&
+            before.ExecutionContext.SessionId is not null &&
+            before.ExecutionContext.SessionId == after.ExecutionContext.SessionId &&
+            string.Equals(after.ExecutionContext.WindowStationName, "WinSta0", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(after.ExecutionContext.DesktopName, "Default", StringComparison.OrdinalIgnoreCase) &&
+            after.Availability == ShellTopologyAvailability.Available;
+        bool valid = reconnectValid && result.SuspendedObserved && result.ResumedObserved &&
+            environmentValid && timelineValid &&
+            result.OwnedResourcesCleaned && !ownedWindowsRemain && addedWorkerCount == 0 &&
+            result.PlaybackFeedbackValidated && result.UserPausePreserved &&
+            result.Retirement.Count > 0 && result.Retirement.All(item =>
+                item.ShutdownSent && item.ShutdownCompleted && item.RendererDisposed &&
+                item.SurfacesCleaned && item.Issues.Count == 0);
         Console.WriteLine(
             $"HOST_SYSTEM_TRANSITION valid={valid} | kind={transitionKind} | " +
             $"suspendedObserved={result.SuspendedObserved} | " +
@@ -987,6 +1159,47 @@ internal static class Program
             $"retirement={result.InitialRetirementCount}->{result.FinalRetirementCount} | " +
             $"sessionIdentityPreserved={result.SessionIdentityPreserved} | " +
             $"ownedWindowsRemain={ownedWindowsRemain}.");
+        Console.WriteLine($"playbackFeedbackValidated={result.PlaybackFeedbackValidated} | " +
+            $"userPausePreserved={result.UserPausePreserved}.");
+        if (result.SessionReconnect is not null)
+            Console.WriteLine($"sessionValidation={result.SessionReconnect.ValidationRevision} | " +
+                $"terminal={result.SessionReconnect.TerminalState} | path={result.SessionReconnect.Path} | " +
+                $"reason={result.SessionReconnect.FailureReason}.");
+        foreach (RendererPlaybackEvidence evidence in result.PolicyEvidence.Concat(result.PlaybackEvidence))
+        {
+            Console.WriteLine($"playbackEvidence={evidence.Kind} | session={evidence.SessionId} | " +
+                $"generation={evidence.Generation} | command={evidence.Command} | " +
+                $"state={evidence.State} | policyReason={evidence.PolicyReason} | " +
+                $"elapsedMs={evidence.Elapsed.TotalMilliseconds:F1} | failure={evidence.FailureType}.");
+        }
+        if (resultJsonPath is not null)
+        {
+            string absolutePath = Path.GetFullPath(resultJsonPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(absolutePath)!);
+            await File.WriteAllTextAsync(absolutePath, JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                runId = Guid.NewGuid().ToString("N"),
+                recordedAt = DateTimeOffset.UtcNow,
+                classification = valid ? "ValidSuccess" : "ProductFailure",
+                fullBuild = WindowsShellTopologyDiagnostics.CaptureBuildIdentity().FullBuild,
+                executionContext = before.ExecutionContext,
+                executionContextAfter = after.ExecutionContext,
+                displays = topology.Displays.Select(display => new
+                {
+                    displayId = display.Id.Value,
+                    display.Bounds,
+                    display.ScaleFactor,
+                    display.IsPrimary,
+                }),
+                pauseBeforeTransition,
+                addedWorkerCount,
+                directShellWorkerCountBefore = DirectShellWorkers(before).Count,
+                directShellWorkerCountAfter = DirectShellWorkers(after).Count,
+                ownedWindowsRemain,
+                result,
+            }, SystemTransitionJsonOptions), cancellationToken).ConfigureAwait(false);
+        }
         foreach (LiveWall.Application.Policies.SystemStateChange change in
                  result.SystemStateTimeline)
         {
@@ -2968,8 +3181,11 @@ internal static class Program
         bool ProductCandidateTopologyChurnEnabled,
         bool HostTaskbarNoopEnabled,
         bool HostExplorerEventRecoveryEnabled,
+        bool HostEnvironmentRecoveryEnabled,
         bool HostSessionLockEnabled,
         bool HostSleepResumeEnabled,
+        bool HostSessionReconnectEnabled,
+        bool PauseBeforeTransition,
         bool TransitionGuardProbeEnabled,
         bool SimulateRendererCrash,
         RaisedDesktopPresentationKind? PresentationKind,
@@ -3003,8 +3219,11 @@ internal static class Program
             bool productCandidateTopologyChurn = false;
             bool hostTaskbarNoop = false;
             bool hostExplorerEventRecovery = false;
+            bool hostEnvironmentRecovery = false;
             bool hostSessionLock = false;
             bool hostSleepResume = false;
+            bool hostSessionReconnect = false;
+            bool pauseBeforeTransition = false;
             bool transitionGuardProbe = false;
             bool confirmDisplayChange = false;
             bool confirmDisplayRotation = false;
@@ -3086,11 +3305,20 @@ internal static class Program
                     case "--raised-desktop-host-explorer-event-recovery":
                         hostExplorerEventRecovery = true;
                         break;
+                    case "--raised-desktop-host-environment-recovery":
+                        hostEnvironmentRecovery = true;
+                        break;
                     case "--raised-desktop-host-session-lock":
                         hostSessionLock = true;
                         break;
                     case "--raised-desktop-host-sleep-resume":
                         hostSleepResume = true;
+                        break;
+                    case "--raised-desktop-host-session-reconnect":
+                        hostSessionReconnect = true;
+                        break;
+                    case "--pause-before-transition":
+                        pauseBeforeTransition = true;
                         break;
                     case "--signal-count" when index + 1 < args.Length:
                         signalCountSpecified = true;
@@ -3228,7 +3456,7 @@ internal static class Program
                 !productCandidateReplacementFault && !productCandidateRetirementFault &&
                 !productCandidateRecovery && !productCandidateTopology &&
                 !productCandidateTopologyChurn && !hostTaskbarNoop &&
-                !hostExplorerEventRecovery && !hostSessionLock && !hostSleepResume &&
+                !hostExplorerEventRecovery && !hostEnvironmentRecovery && !hostSessionReconnect && !hostSessionLock && !hostSleepResume &&
                 !transitionGuardProbe && durationSpecified)
             {
                 throw new ArgumentException(
@@ -3237,14 +3465,14 @@ internal static class Program
             }
 
             bool recoveryRequested = explorerRecoveryProbe || rendererChildRecoveryProbe ||
-                productCandidateRecovery || hostExplorerEventRecovery;
+                productCandidateRecovery || hostExplorerEventRecovery || hostEnvironmentRecovery;
             if (recoveryRequested != confirmExplorerRestart)
             {
                 throw new ArgumentException(
                     "A Raised Desktop Explorer recovery probe requires " +
                     "--confirm-explorer-restart, and that confirmation flag is not valid alone.");
             }
-            if ((productCandidateTopology || productCandidateTopologyChurn) !=
+            if ((productCandidateTopology || productCandidateTopologyChurn || hostEnvironmentRecovery) !=
                 confirmDisplayChange)
             {
                 throw new ArgumentException(
@@ -3269,17 +3497,22 @@ internal static class Program
                 throw new ArgumentException(
                     "--soak-seconds requires --raised-desktop-product-candidate.");
             }
-            if (resultJsonPath is not null && !productCandidate && !productCandidateFault)
+            if (pauseBeforeTransition && !hostSessionLock && !hostSleepResume && !hostSessionReconnect)
+            {
+                throw new ArgumentException("--pause-before-transition requires a Host system transition diagnostic.");
+            }
+            if (resultJsonPath is not null && !productCandidate && !productCandidateFault &&
+                !hostSessionLock && !hostSleepResume && !hostSessionReconnect && !hostEnvironmentRecovery)
             {
                 throw new ArgumentException(
                     "--result-json requires --raised-desktop-product-candidate or " +
-                    "--raised-desktop-product-candidate-fault.");
+                    "--raised-desktop-product-candidate-fault or a Host system transition diagnostic.");
             }
             if (targetDisplaySpecified && !productCandidate && !productCandidateLoop &&
                 !productCandidateFault && !productCandidateReplacementFault &&
                 !productCandidateRetirementFault && !productCandidateRecovery &&
-                !hostTaskbarNoop && !hostExplorerEventRecovery && !hostSessionLock &&
-                !hostSleepResume && !transitionGuardProbe)
+                !hostTaskbarNoop && !hostExplorerEventRecovery && !hostEnvironmentRecovery && !hostSessionLock &&
+                !hostSleepResume && !hostSessionReconnect && !transitionGuardProbe)
             {
                 throw new ArgumentException(
                     "--target-display requires a product candidate, loop/fault, or " +
@@ -3368,8 +3601,10 @@ internal static class Program
                 Convert.ToInt32(productCandidateTopologyChurn) +
                 Convert.ToInt32(hostTaskbarNoop) +
                 Convert.ToInt32(hostExplorerEventRecovery) +
+                Convert.ToInt32(hostEnvironmentRecovery) +
                 Convert.ToInt32(hostSessionLock) +
                 Convert.ToInt32(hostSleepResume) +
+                Convert.ToInt32(hostSessionReconnect) +
                 Convert.ToInt32(transitionGuardProbe) +
                 Convert.ToInt32(raisedDesktopPresentationKind is not null);
             if (modes > 1)
@@ -3394,8 +3629,11 @@ internal static class Program
                 productCandidateTopologyChurn,
                 hostTaskbarNoop,
                 hostExplorerEventRecovery,
+                hostEnvironmentRecovery,
                 hostSessionLock,
                 hostSleepResume,
+                hostSessionReconnect,
+                pauseBeforeTransition,
                 transitionGuardProbe,
                 simulateRendererCrash,
                 raisedDesktopPresentationKind,

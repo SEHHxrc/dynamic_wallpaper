@@ -1,6 +1,7 @@
 using LiveWall.Application.Sessions;
 using LiveWall.Application.Policies;
 using LiveWall.Host.CommandLoop;
+using LiveWall.Host.Orchestration;
 using LiveWall.Platform.Windows.Desktop;
 using LiveWall.Platform.Windows.Displays;
 using LiveWall.Platform.Windows.Power;
@@ -25,6 +26,17 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
     private readonly CancellationTokenSource shutdown = new();
     private readonly object systemStateHistoryGate = new();
     private readonly List<SystemStateChange> systemStateHistory = [];
+    private readonly List<SessionEventEvidence> sessionEventHistory = [];
+    private long sessionEventSequence;
+    private readonly long sessionJournalStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+
+    internal IReadOnlyList<SessionEventEvidence> GetSessionEventHistoryForDiagnostics()
+    {
+        lock (systemStateHistoryGate)
+        {
+            return sessionEventHistory.ToArray();
+        }
+    }
     private Task? signalTask;
     private bool started;
     private bool stopping;
@@ -36,6 +48,8 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
     private ExplorerEventForwardingFailure? lastExplorerForwardingFailure;
     private SystemStateForwardingFailure? lastSystemStateForwardingFailure;
     private long forwardedSystemStateCount;
+    private readonly TimeSpan sessionValidationBudget = TimeSpan.FromSeconds(10);
+    private readonly bool consumeNativeWindowSignals = true;
 
     public WindowsDesktopEventBridge(
         WindowsDesktopHost desktopHost,
@@ -56,9 +70,14 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
         WindowsDisplayTopologySource displayTopologySource,
         HostCommandLoop commandLoop,
         IExplorerChangeMonitor explorerMonitor,
-        IWindowsSystemStateSource? systemStateSource = null)
+        IWindowsSystemStateSource? systemStateSource = null,
+        bool consumeNativeWindowSignals = true,
+        TimeSpan? sessionValidationBudget = null)
         : this(desktopHost, displayTopologySource, commandLoop)
     {
+        this.consumeNativeWindowSignals = consumeNativeWindowSignals;
+        this.sessionValidationBudget = sessionValidationBudget ?? TimeSpan.FromSeconds(10);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(this.sessionValidationBudget, TimeSpan.Zero);
         this.explorerMonitor.Dispose();
         this.explorerMonitor = explorerMonitor ??
             throw new ArgumentNullException(nameof(explorerMonitor));
@@ -115,7 +134,10 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
         systemStateSource.Changed += OnSystemStateChanged;
         explorerMonitor.Start();
         ForwardSystemState(systemStateSource.Current);
-        signalTask = ConsumeWindowSignalsAsync(shutdown.Token);
+        if (consumeNativeWindowSignals)
+        {
+            signalTask = ConsumeWindowSignalsAsync(shutdown.Token);
+        }
     }
 
     public void RequestEnvironmentValidation()
@@ -181,6 +203,34 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
 
     private void ProcessWindowSignal(DesktopWindowSignal signal)
     {
+        if (signal.Kind is DesktopWindowSignalKind.SessionDisconnected or
+            DesktopWindowSignalKind.SessionReconnected)
+        {
+            bool matching = signal.SessionId is null ||
+                signal.SessionId == System.Diagnostics.Process.GetCurrentProcess().SessionId;
+            lock (systemStateHistoryGate)
+            {
+                sessionEventHistory.Add(new SessionEventEvidence(++sessionEventSequence,
+                    signal.Kind, matching, systemStateSource.Current.Revision,
+                    stopping || commandLoop.IsStoppingForEnvironmentEvents,
+                    System.Diagnostics.Stopwatch.GetElapsedTime(sessionJournalStarted)));
+                if (sessionEventHistory.Count > 64)
+                {
+                    sessionEventHistory.RemoveAt(0);
+                }
+            }
+            if (!matching)
+            {
+                return;
+            }
+        }
+        if (stopping || commandLoop.IsStoppingForEnvironmentEvents)
+        {
+            Volatile.Write(ref lastSystemStateForwardingFailure,
+                new SystemStateForwardingFailure(SystemStateForwardingFailureKind.HostStopping,
+                    systemStateSource.Current.Revision, systemStateSource.Current.Reason, DateTimeOffset.UtcNow));
+            return;
+        }
         switch (signal.Kind)
         {
             case DesktopWindowSignalKind.TaskbarCreated:
@@ -236,6 +286,7 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
         object? sender,
         ExplorerValidationFailedEventArgs args)
     {
+        RejectSessionValidation(SessionEnvironmentFailureReason.ValidationFailed, args.SystemRevision);
         ExplorerValidationFailure failure = new(
             DateTimeOffset.UtcNow,
             args.Exception.GetType().FullName ?? args.Exception.GetType().Name,
@@ -246,8 +297,13 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
 
     private void OnExplorerValidationCompleted(
         object? sender,
-        ExplorerValidationCompletedEventArgs args) =>
-        systemStateSource.CompleteEnvironmentValidation(args.ShellAvailable);
+        ExplorerValidationCompletedEventArgs args)
+    {
+        if (!stopping && !commandLoop.IsStoppingForEnvironmentEvents)
+        {
+            systemStateSource.CompleteEnvironmentValidation(args.ShellAvailable, args.SystemRevision);
+        }
+    }
 
     private void OnSystemStateChanged(object? sender, SystemStateChangedEventArgs args)
     {
@@ -260,7 +316,47 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
         // Refresh is synchronous. Playback remains suspended until the debounced Shell
         // validation completes and releases the source's pending resume snapshot.
         displayTopologySource.Refresh();
-        explorerMonitor.RequestValidation();
+        explorerMonitor.RequestValidation(args.Current.Revision);
+        if (args.Current.Snapshot.IsSessionDisconnected)
+        {
+            _ = ObserveSessionValidationDeadlineAsync(args.Current.Revision);
+        }
+    }
+
+    private async Task ObserveSessionValidationDeadlineAsync(long revision)
+    {
+        try
+        {
+            await Task.Delay(sessionValidationBudget, shutdown.Token).ConfigureAwait(false);
+            if (systemStateSource.RejectEnvironmentValidation(revision))
+            {
+                ForwardSessionValidationFailure(revision, SessionEnvironmentFailureReason.ValidationTimeout);
+            }
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+    }
+
+    private void RejectSessionValidation(SessionEnvironmentFailureReason reason, long expectedRevision)
+    {
+        SystemStateChange current = systemStateSource.Current;
+        if (current.Snapshot.IsSessionDisconnected &&
+            systemStateSource.RejectEnvironmentValidation(expectedRevision))
+        {
+            ForwardSessionValidationFailure(current.Revision, reason);
+        }
+    }
+
+    private void ForwardSessionValidationFailure(long revision, SessionEnvironmentFailureReason reason)
+    {
+        SystemStateForwardingFailureKind? failure = stopping || commandLoop.IsStoppingForEnvironmentEvents
+            ? SystemStateForwardingFailureKind.HostStopping
+            : commandLoop.TryPost(new SessionEnvironmentFailedCommand(revision, reason))
+                ? null : SystemStateForwardingFailureKind.CommandChannelClosed;
+        if (failure is not null)
+        {
+            Volatile.Write(ref lastSystemStateForwardingFailure, new SystemStateForwardingFailure(
+                failure.Value, revision, SystemStateChangeReason.SessionReconnectRequested, DateTimeOffset.UtcNow));
+        }
     }
 
     private void ForwardSystemState(SystemStateChange change)
@@ -325,3 +421,6 @@ internal sealed record SystemStateForwardingFailure(
     long Revision,
     SystemStateChangeReason Reason,
     DateTimeOffset OccurredAt);
+
+internal sealed record SessionEventEvidence(long Sequence, DesktopWindowSignalKind Kind,
+    bool CurrentSessionMatches, long SystemRevisionBeforeEvent, bool HostStopping, TimeSpan Elapsed);

@@ -217,6 +217,34 @@ DesktopHostDiagnostics.exe --raised-desktop-host-session-lock --target-display a
 DesktopHostDiagnostics.exe --raised-desktop-host-sleep-resume --target-display all --duration-seconds 5
 ```
 
-命令输出 `SYSTEM_TRANSITION_ARMED` 后，用户在三分钟内手工执行锁定/解锁或睡眠/唤醒。有效结果必须观察到对应 Suspended 与验证后 Resume reason；Host generation、Replace/retirement 数量和 Session/Renderer 身份保持不变，最终正常 Shutdown 且无自有 HWND。工具不会自动调用 `LockWorkStation`、睡眠 API、禁用显示设备或修改生产 allowlist。当前只完成代码与 `235/235` 自动门禁，实机结果尚未登记。
+命令输出 `SYSTEM_TRANSITION_ARMED` 后，用户在三分钟内手工执行锁定/解锁或睡眠/唤醒。人工等待不使用 Apply/retirement deadline；事件确认后另用有限恢复/反馈预算。每次可用 `--result-json artifacts/diagnostics/<独立样本>.json` 保存系统 revision、策略决定、实际 Pipe 命令写入、Renderer 协议回执、恢复终态和完整 retirement。异常样本保存 `TransitionIncomplete`（外部取消为 `Cancelled`），缺少清理验证不得写成通过。
+
+锁解且环境稳定时要求 Host generation、Replace/retirement 数量和 Session/Renderer 身份不变。睡眠恢复若 Shell/拓扑改变，则等待已有 recovery/reconciliation 明确终态并单独记录，不以身份变化误判失败，也不把重建写成身份保持。全部样本必须有 Suspend 和最终播放状态的实际协议证据、正常 Shutdown、Renderer Dispose、Surface 清理、无自有 HWND/新增 WorkerW。增加 `--pause-before-transition` 验证用户暂停→锁定→解锁后保持 Paused。橙色不变不证明暂停，测试 Renderer 无自主帧循环。
+
+工具不会主动锁屏、发起睡眠、禁用显示设备或修改生产 allowlist。2026-10-11 补齐显式 suspend/resume 通知注册与释放后，Debug/Release 自动基线为 `246/246`。物理单屏启动/退出、锁解 3/3、用户暂停锁解 1/1、睡眠恢复 2/2 均通过；首个睡眠 `TransitionIncomplete` 样本继续保留，不覆盖。样本环境为 `26200.9457 / WinSta0\Default / S0 Modern Standby`；双屏系统恢复待补测，不因此接受 Stage B。
+
+### P1.9.3.1 真实会话断开与重连入口
+
+首版范围：RDP 动态壁纸呈现不支持；RDP 实机为 `OutOfScope / WaivedForV1`，不是通过，也不阻塞后续开发。以下入口保留用于本地用户切换等安全环境下的诊断；通用会话保护不删除。本地用户切换实机当前为 `NotValidated`。
+
+```powershell
+DesktopHostDiagnostics.exe --raised-desktop-host-session-reconnect --target-display primary --duration-seconds 5 --result-json artifacts/diagnostics/session-reconnect-01.json
+```
+
+复用正式 Runtime、事件桥及会话环境终态，不主动断开、切换用户、注销、启用 RDP 或重启 Explorer。输出 `SESSION_RECONNECT_ARMED` 后才由用户按事先确认的方式操作；人工操作预算独立为十分钟。必须返回原用户的同一 Session；不要注销原账户，否则 Host 进程会退出。只有锁屏/解锁通知、不存在真实断开/重连时，结果为 `TransitionIncomplete`，不能当作通过。
+
+结果保存 armed 后的通知序号、当前 Session 匹配结果、validation revision、终态、Resume/Reconfigure/Rebuild 路径、阶段失败信息、实际播放命令与独立协议回执，以及关停清理证据。失败终态保留为 `ProductFailure`；人工未完成或事件缺失保留为 `TransitionIncomplete`；清理未经验证时明确写 `Unavailable`。稳定环境仍要求身份、generation、Replace/retirement 不变；环境变化则等待 recovery/reconciliation 终态，不把 Rebuild 写成 Resume。返回后同时验证 WinSta0\Default、原 Session 和 Shell 可用。
+
+可附加 `--pause-before-transition` 验证重连后保留用户暂停。静态色块不能证明动态帧停止。默认入口仍是诊断，不写配置或 allowlist。2026-10-11 Debug/Release 自动基线 `277/277`，Release 工具零警告/错误；真实会话样本尚未执行。本机 EditionID 为 `CoreCountrySpecific`，原生 RDP 入站实机样本受环境限制；切换用户须先确认已有账户和真实通知序列。
+
+### P1.9.4-C Shell/display 并发实机入口
+
+```powershell
+DesktopHostDiagnostics.exe --raised-desktop-host-environment-recovery --confirm-display-change --confirm-explorer-restart --target-display all --duration-seconds 5 --result-json artifacts/diagnostics/environment-recovery-01.json
+```
+
+必须先得到用户对色块和 Explorer 重启的明确同意。默认目标仍为 primary；双屏测试显式选择 all。用户预先打开显示设置，等 `ENVIRONMENT_RECOVERY_ARMED` 后在 180 秒内只修改一次目标屏缩放，并保留更改，不拔插、旋转、锁屏、睡眠或重复操作。工具只在正式 Host 拓扑准备仍在途时重启 Explorer 一次；`ENVIRONMENT_RECOVERY_RESTARTING` 后允许短暂黑屏和图标/任务栏恢复，随后等待橙色完整覆盖并在指定观察时间后正常退出。不会自动还原显示设置；用户如需还原，须等诊断退出后手动处理。
+
+结果通过必须有 confirmed Shell generation 抢占旧 reconciliation 的证据、一个成功 recovery、一次批量 Replace、最新 revision 的精确 Surface bounds、Renderer 实际退出及资源清理。没有重叠为 `EnvironmentInconclusive`（独立退出码 9），不是通过或自动重试理由；溢出为 HarnessFailure，异常记录 phase/type 和 DiagnosticIncomplete（外部取消为 Cancelled），不得假定清理成功。逐 revision/recovery 时间线和清理证据保存 JSON，不包含认证令牌、Pipe 名或 Shell HWND/PID。Shell WorkerW 前后计数仅说明是否新增，不证明未公开请求的可撤销性。当前 Debug/Release `302/302`；实机尚未执行，Stage B 仍未接受。
 
 验收矩阵和下一步子窗口/Z-order 诊断方向见 `docs/windows-desktop-host.md`；实时状态见 `docs/implementation-status.md`。

@@ -251,6 +251,10 @@ P1.9.2 复用同一隐藏窗口接收当前 Session 的 `WM_WTSSESSION_CHANGE`�
 
 ## 6. 诊断和 Stage B 完成门槛
 
+### 首版本地桌面支持范围（2026-10-11）
+
+RDP 动态壁纸呈现不在首版支持范围，RDP 实机矩阵为 `OutOfScope / WaivedForV1`，不再单独阻塞 Stage B；豁免不能视为测试通过。保留 WTS 通用会话断开/重连门禁、远程会话检测与暂停/失败关闭策略。本地快速用户切换实机保持 `NotValidated`，不通过锁屏样本替代。P1.9.2 单屏锁解与睡眠代表场景已经通过，双屏系统恢复仍待补；后续开发优先完成 P1.9.4 Shell/display 并发恢复与 P1.9.5 退出竞态，后文早期包含 RDP 的探索顺序按本节范围执行。
+
 `DesktopHostDiagnostics` 当前提供以下入口：
 
 ```powershell

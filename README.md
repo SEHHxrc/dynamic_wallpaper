@@ -50,7 +50,7 @@ P1.8.2 的自动安全边界已接线：运行中的非空拓扑只有在相隔 
 
 P1.9.1 已把 `TaskbarCreated` 的正式事件链接入真实 `WindowsHostRuntime` 并完成双屏实机验收。无 Shell 变化的 10 次 burst 只触发一次防抖验证，Host generation、Session 身份、Replace 与 retirement 均保持不变；真实 Explorer 重启则由信号/后备探针确认一次 Shell generation 变化，只形成一个 recovery operation 和一次批量 Replace。本次真实恢复按安全策略得到 `Succeeded + Rebuilt`，两屏同步经历 Shell 黑屏、恢复后重新显示橙色，未出现半屏提交、重复恢复、层级覆盖或自有 HWND 残留。P1.9.2–P1.9.5 的系统会话与并发/退出矩阵仍未完成。
 
-P1.9.2 的代码与自动门禁已经接线：Application 定义完整快照、单调 revision、变化原因和“需要环境验证”标记；Windows 隐藏窗口聚合 WTS 锁定/解锁、显示电源、系统睡眠/唤醒和 AC/DC 广播。锁定、显示关闭和系统 suspend 会立即把 Renderer 策略置为 `Suspended`；解锁、点亮和唤醒仍保持暂停，只有重新采样显示拓扑并完成 Shell 验证后才发布恢复。旧 revision、重复信号、交叠恢复、锁屏期间 Apply 提交及 Stopping 丢弃均有自动覆盖，Debug/Release 基线为 `235/235`。真实锁屏/解锁与睡眠/恢复入口已经准备好，但实机结果尚未登记。
+P1.9.2 自动门禁及物理单屏代表场景已通过：基线启动/退出、锁解 3/3、用户暂停锁解 1/1、S0 Modern Standby 睡眠恢复 2/2；首个未完成睡眠样本继续保留，双屏系统恢复独立待补。P1.9.3.0 已实现当前 Session 事件过滤、断开期间的呈现提交门禁、最新环境延后处理、revision 关联的重连验证和可等待终态；P1.9.3.1 显式诊断入口已完成。首版不支持 RDP 动态壁纸呈现，RDP 实机为 `OutOfScope / WaivedForV1`，不再阻塞开发；通用会话保护保留，本地快速用户切换实机为 `NotValidated`。已进入 P1.9.4 的 Shell/display 并发恢复自动收口，完整仲裁和实机矩阵仍待完成。最新验证结果以统一台账为准；协议 v1、DTO/Schema、生产 allowlist 和 Stage B 状态不变。
 
 `26200.9457 / WinSta0\Default` 的双屏 refresh-only 实机样本已经通过：内置主屏从 120 Hz 改为 60 Hz 时 DisplayId、bounds、scale 和虚拟原点均不变，Host 产生 `NoChange / generation=none`，两个活动 Session 身份保持、零 retirement、零 Surface Replace，测试色和桌面层级持续正确，最终清理完整。
 

@@ -10,4 +10,4 @@
 
 该工具仍是测试 Renderer，并非 Video/Web Renderer。它现已覆盖一次性令牌 `Hello`、`Initialize → Initialized`、`AttachSurface → SurfaceAttached`、`LoadWallpaper → ContentLoaded → FirstFramePresented`、严格递增 generation 的再次附着和 `Shutdown → ShutdownCompleted`。
 
-测试 Renderer 会拒绝 Attach 前的 Load、重复/倒退 generation、重复 messageId 和未知命令。Host 正式会话另行验证握手/阶段超时、错误令牌、未知事件与重复事件。播放控制和 Video/Web 内容仍不属于此工具；工具通过也不能替代产品候选链和显示矩阵验收。
+测试 Renderer 会拒绝 Attach 前的 Load、重复/倒退 generation、重复 messageId 和未知命令。Host 正式会话另行验证握手/阶段超时、错误令牌、未知事件与重复事件。现在支持加载后的 Play/Resume、Pause、Suspend，并发送真实协议 `PlaybackStateChanged` 回执。静态合成色块没有自主渲染循环，暂停与播放在视觉上相同；回执只证明此测试 Renderer 接受播放控制，不能替代 Video/Web 动态内容的帧计数验收或显示矩阵。

@@ -14,7 +14,7 @@ internal interface IExplorerChangeMonitor : IDisposable
 
     void Stop();
 
-    void RequestValidation();
+    void RequestValidation(long systemRevision = 0);
 }
 
 public sealed class ExplorerMonitor : IExplorerChangeMonitor
@@ -31,6 +31,7 @@ public sealed class ExplorerMonitor : IExplorerChangeMonitor
     private ulong lastProgmanHandle;
     private bool outageReported;
     private bool disposed;
+    private long requestedSystemRevision;
 
     public ExplorerMonitor(Func<ulong?> trackedAttachPoint)
         : this(
@@ -96,11 +97,15 @@ public sealed class ExplorerMonitor : IExplorerChangeMonitor
         }
     }
 
-    public void RequestValidation()
+    public void RequestValidation(long systemRevision = 0)
     {
         lock (gate)
         {
             ThrowIfDisposed();
+            if (systemRevision > 0)
+            {
+                requestedSystemRevision = systemRevision;
+            }
             validationTimer.Change(debounceInterval, Timeout.InfiniteTimeSpan);
         }
     }
@@ -121,13 +126,16 @@ public sealed class ExplorerMonitor : IExplorerChangeMonitor
         fallbackTimer.Dispose();
     }
 
-    internal void CheckNow()
+    internal void CheckNow(Action<long>? validationStarted = null)
     {
         ExplorerRestartedEventArgs? notification = null;
         ulong currentProgmanHandle;
+        long validatedSystemRevision;
         lock (gate)
         {
             ThrowIfDisposed();
+            validatedSystemRevision = requestedSystemRevision;
+            validationStarted?.Invoke(validatedSystemRevision);
             currentProgmanHandle = shellProbe.GetProgmanHandle();
             ulong? attachPoint = trackedAttachPoint();
             bool progmanRecreated = lastProgmanHandle != 0 &&
@@ -169,21 +177,23 @@ public sealed class ExplorerMonitor : IExplorerChangeMonitor
             new ExplorerValidationCompletedEventArgs(
                 currentProgmanHandle != 0,
                 notification is not null,
-                currentProgmanHandle));
+                currentProgmanHandle,
+                validatedSystemRevision));
     }
 
     private void OnTimer(object? state)
     {
+        long validatedSystemRevision = 0;
         try
         {
-            CheckNow();
+            CheckNow(revision => validatedSystemRevision = revision);
         }
         catch (ObjectDisposedException)
         {
         }
         catch (Exception exception)
         {
-            ValidationFailed?.Invoke(this, new ExplorerValidationFailedEventArgs(exception));
+            ValidationFailed?.Invoke(this, new ExplorerValidationFailedEventArgs(exception, validatedSystemRevision));
         }
     }
 
@@ -211,8 +221,9 @@ public sealed class ExplorerRestartedEventArgs(
     public ulong CurrentProgmanHandle { get; } = currentProgmanHandle;
 }
 
-public sealed class ExplorerValidationFailedEventArgs(Exception exception) : EventArgs
+public sealed class ExplorerValidationFailedEventArgs(Exception exception, long systemRevision = 0) : EventArgs
 {
+    public long SystemRevision { get; } = systemRevision;
     public Exception Exception { get; } = exception ??
         throw new ArgumentNullException(nameof(exception));
 }
@@ -220,8 +231,10 @@ public sealed class ExplorerValidationFailedEventArgs(Exception exception) : Eve
 public sealed class ExplorerValidationCompletedEventArgs(
     bool shellAvailable,
     bool shellChanged,
-    ulong currentProgmanHandle) : EventArgs
+    ulong currentProgmanHandle,
+    long systemRevision = 0) : EventArgs
 {
+    public long SystemRevision { get; } = systemRevision;
     public bool ShellAvailable { get; } = shellAvailable;
 
     public bool ShellChanged { get; } = shellChanged;
@@ -240,7 +253,23 @@ internal sealed class NativeExplorerShellProbe : IExplorerShellProbe
 {
     public ulong GetProgmanHandle()
     {
+        ShellExecutionContext context = new WindowsShellNativeProbe().CaptureExecutionContext();
+        if (!string.Equals(context.WindowStationName, "WinSta0", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(context.DesktopName, "Default", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
         nint handle = DesktopNativeMethods.FindWindow("Progman", null);
+        if (handle == 0 || handle != DesktopNativeMethods.GetShellWindow())
+        {
+            return 0;
+        }
+        _ = DesktopNativeMethods.GetWindowThreadProcessId(handle, out uint processId);
+        if (!DesktopNativeMethods.ProcessIdToSessionId(processId, out uint shellSession) ||
+            context.SessionId != shellSession)
+        {
+            return 0;
+        }
         return unchecked((ulong)handle.ToInt64());
     }
 

@@ -7,6 +7,24 @@ namespace LiveWall.Windows.IntegrationTests;
 public sealed class DesktopWindowDispatcherTests
 {
     [Fact]
+    public async Task SuspendResumeNotificationLeaseIsRegisteredAndReleasedWithDispatcher()
+    {
+        DesktopWindowDispatcher dispatcher = new();
+        try
+        {
+            await dispatcher.Ready;
+            dispatcher.SuspendResumeNotificationsRegistered.Should().BeTrue();
+        }
+        finally
+        {
+            await dispatcher.DisposeAsync();
+        }
+
+        dispatcher.SuspendResumeNotificationsRegistered.Should().BeFalse();
+        await dispatcher.Completion;
+    }
+
+    [Fact]
     public async Task WorkRunsOnOneStaThreadAndDispatcherStopsCleanly()
     {
         DesktopWindowDispatcher dispatcher = new();

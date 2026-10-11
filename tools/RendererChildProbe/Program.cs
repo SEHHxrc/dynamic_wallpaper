@@ -114,6 +114,28 @@ internal static class Program
 
                 switch (command.Type)
                 {
+                    case RendererCommandTypes.Play:
+                    case RendererCommandTypes.Resume:
+                    case RendererCommandTypes.Pause:
+                    case RendererCommandTypes.Suspend:
+                        if (!contentLoaded || command.Generation != currentGeneration)
+                        {
+                            throw InvalidState(command, "Playback requires loaded content and the current generation.");
+                        }
+                        // This synthetic Renderer has no autonomous frame loop. Its committed
+                        // frame remains visible while paused; the wire feedback is the evidence.
+                        string playbackState = command.Type switch
+                        {
+                            RendererCommandTypes.Pause => "Paused",
+                            RendererCommandTypes.Suspend => "Suspended",
+                            _ => "Playing",
+                        };
+                        await channel.WriteAsync(CreateEnvelope(sessionId, currentGeneration,
+                                RendererEventTypes.PlaybackStateChanged,
+                                new PlaybackStateChangedPayload(playbackState, null, null)))
+                            .ConfigureAwait(false);
+                        break;
+
                     case RendererCommandTypes.Shutdown:
                         if (graphics is not null)
                         {

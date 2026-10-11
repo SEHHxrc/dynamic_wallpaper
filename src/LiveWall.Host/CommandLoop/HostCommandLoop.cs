@@ -49,6 +49,26 @@ internal sealed class HostCommandLoop : IAsyncDisposable
     private DisplayReconciliationOperation? activeDisplayReconciliationOperation;
     private long? activeDisplayReconciliationGeneration;
     private volatile bool stopping;
+    private readonly RendererPlaybackJournal playbackJournal = new();
+    private bool deferredSessionShellChange;
+    private DisplayTopology? deferredSessionTopology;
+    private readonly HashSet<long> sessionBlockedGenerations = [];
+    private WallpaperAssignment[]? pendingApplyAssignments;
+    private readonly ConcurrentDictionary<long, SessionEnvironmentOperation> sessionEnvironmentOperations = new();
+    private SessionEnvironmentOperation? activeSessionEnvironmentOperation;
+    private CancellationTokenSource? activeRecoveryPreparation;
+    private bool recoveryTopologyPending;
+    private bool recoveryTopologyDirty;
+
+    internal Task<SessionEnvironmentResult> WaitForSessionEnvironmentAsync(long validationRevision,
+        CancellationToken cancellationToken) =>
+        sessionEnvironmentOperations.TryGetValue(validationRevision, out SessionEnvironmentOperation? operation)
+            ? operation.Completion.WaitAsync(cancellationToken)
+            : Task.FromException<SessionEnvironmentResult>(new InvalidOperationException(
+                $"Session validation {validationRevision} is not available."));
+
+    internal IReadOnlyList<RendererPlaybackEvidence> GetPlaybackPolicyEvidenceForDiagnostics() =>
+        playbackJournal.Snapshot();
 
     public HostCommandLoop(
         ISessionCoordinator coordinator,
@@ -224,6 +244,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        activeSessionEnvironmentOperation?.Complete(SessionEnvironmentTerminalState.Cancelled,
+            reason: SessionEnvironmentFailureReason.HostStopping);
         channel.Writer.TryComplete();
         shutdown.Cancel();
         if (activeRecoveryOperation is not null)
@@ -320,6 +342,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                 rebuilt,
                 cancellationToken),
             DisplayTopologyChangedCommand topology => SetTopologyAsync(topology, cancellationToken),
+            SystemStateChangedCommand systemState => SetSystemStateAsync(systemState, cancellationToken),
+            ContinueSessionReconnectCommand reconnect => ContinueSessionReconnectAsync(reconnect, cancellationToken),
             _ => Task.FromResult(Handle(command, cancellationToken)),
         };
     }
@@ -416,11 +440,12 @@ internal sealed class HostCommandLoop : IAsyncDisposable
     private HostCommandResult Handle(HostCommand command, CancellationToken cancellationToken) =>
         command switch
         {
+            SessionEnvironmentFailedCommand failed => CompleteSessionEnvironmentFailure(failed),
+            SessionEnvironmentCompletedCommand completed => CompleteSessionEnvironment(completed),
             ApplyWallpaperCommand apply => BeginApply(apply, cancellationToken),
             RestoreAssignmentsCommand restore => BeginRestore(restore, cancellationToken),
             ApplyPreparationFailedCommand failed => FailApply(failed),
             DisplayReconciliationFailedCommand failed => FailDisplayReconciliation(failed),
-            SystemStateChangedCommand systemState => SetSystemState(systemState, cancellationToken),
             SetPlaybackPolicyCommand policy => SetPlaybackPolicy(policy, cancellationToken),
             ChangePlaybackIntentCommand playback => ChangePlaybackIntent(playback, cancellationToken),
             RendererEventCommand rendererEvent => HandleRendererEvent(rendererEvent),
@@ -476,6 +501,11 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         WallpaperAssignment[] assignments,
         CancellationToken cancellationToken)
     {
+        if (state.SystemState.IsSessionDisconnected ||
+            activeSessionEnvironmentOperation is { Completion.IsCompleted: false })
+        {
+            return HostCommandResult.Reject(state.Revision, "host.session.presentation_blocked");
+        }
         if (state.DisplayTopology is null)
         {
             return HostCommandResult.Reject(state.Revision, "host.display.topology_unavailable");
@@ -505,6 +535,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             CompleteSupersededApply(state.Generation);
         }
         long generation = state.BeginGeneration();
+        pendingApplyAssignments = assignments;
         ApplyGenerationOperation operation = new(
             generation,
             surfaceCount,
@@ -529,6 +560,12 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         ApplyPreparedCommand command,
         CancellationToken cancellationToken)
     {
+        if (IsSessionCommitBlocked(command.Generation))
+        {
+            CancelSessionApply(command.Generation);
+            TrackRetirement(command.Prepared.Sessions, CancellationToken.None);
+            return HostCommandResult.Reject(state.Revision, "host.session.presentation_blocked");
+        }
         if (command.Generation != state.Generation ||
             state.DisplayTopology?.Revision != command.Prepared.DisplayTopologyRevision)
         {
@@ -588,6 +625,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         }
 
         IReadOnlyList<ActiveHostSession> retired = state.ReplacePreparedSessions(command.Prepared);
+        pendingApplyAssignments = null;
         ApplyPlaybackPolicy(null, cancellationToken);
         ApplyGenerationOperation? completedOperation = FindApplyOperation(command.Generation);
         completedOperation?.Record(
@@ -613,11 +651,17 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             command.FailureReason,
             command.Message,
             command.TerminalState);
+        pendingApplyAssignments = null;
         return HostCommandResult.Reject(state.Revision, command.ErrorCode);
     }
 
     private HostCommandResult BeginDesktopRecovery(CancellationToken cancellationToken)
     {
+        if (state.SystemState.IsSessionDisconnected)
+        {
+            deferredSessionShellChange = true;
+            return HostCommandResult.Success(state.Revision, state.Snapshot());
+        }
         if (state.DisplayTopology is null)
         {
             return HostCommandResult.Reject(state.Revision, "host.display.topology_unavailable");
@@ -633,6 +677,24 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         if (desktopRecoveryInProgress)
         {
             return HostCommandResult.Success(state.Revision, state.Snapshot());
+        }
+
+        // A confirmed Shell change invalidates every uncommitted plan, even if it
+        // already produced FirstFrame. Only the recovery transaction may now commit.
+        foreach ((long pendingGeneration, ApplyGenerationOperation operation) in applyOperations)
+        {
+            if (!operation.Completion.IsCompleted)
+                CompleteSupersededApply(pendingGeneration);
+        }
+        if (activeDisplayReconciliationOperation is not null)
+        {
+            activeDisplayReconciliationOperation.Complete(
+                DisplayReconciliationTerminalState.Cancelled,
+                activeDisplayReconciliationGeneration,
+                ApplyFailureReason.Superseded,
+                "Display preparation was superseded by a confirmed Shell generation change.");
+            activeDisplayReconciliationOperation = null;
+            activeDisplayReconciliationGeneration = null;
         }
 
         desktopRecoveryInProgress = true;
@@ -658,7 +720,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             state.GetPreparedSessions().OrderBy(session => session.SurfaceOrdinal).ToArray(),
             state.DisplayTopology,
             generation,
-            cancellationToken);
+            (activeRecoveryPreparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)).Token);
         return HostCommandResult.Success(state.Revision, state.Snapshot());
     }
 
@@ -669,18 +731,21 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         PreparedRecovery recovery = command.Recovery;
         if (command.Generation != state.Generation)
         {
+            await coordinator.AbandonRecoveryAsync(recovery, CancellationToken.None).ConfigureAwait(false);
+            CompleteSupersededRecovery(command.Generation);
+            return HostCommandResult.Success(state.Revision);
+        }
+        if (IsSessionCommitBlocked(command.Generation))
+        {
+            state.InvalidateAllSessions();
             await coordinator.AbandonRecoveryAsync(recovery, CancellationToken.None)
                 .ConfigureAwait(false);
             desktopRecoveryInProgress = false;
-            CompleteActiveRecovery(
-                state.Generation,
-                DesktopRecoveryTerminalState.Cancelled,
-                null,
-                ApplyFailureReason.Superseded,
-                "Desktop recovery was superseded by a newer Host generation.");
-            return HostCommandResult.Success(state.Revision);
+            deferredSessionShellChange = true;
+            CompleteActiveRecovery(command.Generation, DesktopRecoveryTerminalState.Cancelled,
+                null, ApplyFailureReason.SessionUnavailable, "Session disconnected before recovery commit.");
+            return HostCommandResult.Reject(state.Revision, "host.session.presentation_blocked");
         }
-
         if (state.DisplayTopology?.Revision != recovery.DisplayTopologyRevision)
         {
             return await AbandonRecoveryAndScheduleRebuildAsync(
@@ -812,10 +877,19 @@ internal sealed class HostCommandLoop : IAsyncDisposable
     {
         if (command.Generation != state.Generation)
         {
+            CompleteSupersededRecovery(command.Generation);
             return HostCommandResult.Success(state.Revision);
         }
 
         state.InvalidateAllSessions();
+        if (IsSessionCommitBlocked(command.Generation))
+        {
+            deferredSessionShellChange = true;
+            desktopRecoveryInProgress = false;
+            CompleteActiveRecovery(command.Generation, DesktopRecoveryTerminalState.Cancelled,
+                null, ApplyFailureReason.SessionUnavailable, "Session interrupted recovery preparation.");
+            return HostCommandResult.Success(state.Revision, state.Snapshot());
+        }
         desktopRecoveryInProgress = true;
         ScheduleRecoveryRebuild(command.Generation, attempt: 1, shutdown.Token);
         return HostCommandResult.Reject(state.Revision, command.ErrorCode);
@@ -828,15 +902,13 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         if (command.ExpectedGeneration != state.Generation ||
             state.GetPreparedSessions().Count > 0)
         {
-            desktopRecoveryInProgress = false;
-            CompleteActiveRecovery(
-                state.Generation,
-                DesktopRecoveryTerminalState.Cancelled,
-                null,
-                ApplyFailureReason.Superseded,
-                "Desktop recovery rebuild was superseded by current Host state.");
+            if (command.ExpectedGeneration != state.Generation)
+                CompleteSupersededRecovery(command.ExpectedGeneration);
             return HostCommandResult.Success(state.Revision);
         }
+
+        if (!desktopRecoveryInProgress || activeRecoveryOperation is null)
+            return HostCommandResult.Success(state.Revision);
 
         return StartRecoveryRebuild(command.Attempt, cancellationToken);
     }
@@ -845,6 +917,15 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         int attempt,
         CancellationToken cancellationToken)
     {
+        recoveryTopologyDirty = false;
+        if (state.SystemState.IsSessionDisconnected)
+        {
+            deferredSessionShellChange = true;
+            desktopRecoveryInProgress = false;
+            CompleteActiveRecovery(state.Generation, DesktopRecoveryTerminalState.Cancelled,
+                null, ApplyFailureReason.SessionUnavailable, "Session disconnected before rebuild.");
+            return HostCommandResult.Success(state.Revision, state.Snapshot());
+        }
         if (state.DisplayTopology is null)
         {
             desktopRecoveryInProgress = false;
@@ -857,8 +938,11 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             return HostCommandResult.Reject(state.Revision, "host.display.topology_unavailable");
         }
 
-        IReadOnlyList<WallpaperAssignment> assignments = state.GetAssignments();
-        if (assignments.Count == 0)
+        HashSet<DisplayId> connectedDisplays = state.DisplayTopology.Displays
+            .Select(display => display.Id).ToHashSet();
+        WallpaperAssignment[] assignments = state.GetAssignments()
+            .Where(assignment => connectedDisplays.Contains(assignment.DisplayId)).ToArray();
+        if (assignments.Length == 0)
         {
             desktopRecoveryInProgress = false;
             CompleteActiveRecovery(
@@ -868,12 +952,23 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             return HostCommandResult.Success(state.Revision);
         }
 
+        int surfaceCount;
+        try
+        {
+            surfaceCount = coordinator.GetPlannedSurfaceCount(assignments, state.DisplayTopology);
+        }
+        catch (LayoutPlanningException exception)
+        {
+            desktopRecoveryInProgress = false;
+            CompleteActiveRecovery(state.Generation, DesktopRecoveryTerminalState.Failed, null,
+                ApplyFailureReason.TopologyFailed, exception.Message);
+            return HostCommandResult.Reject(state.Revision, exception.ErrorCode);
+        }
         long generation = state.BeginGeneration();
         activeRecoveryOperation?.Record(
             generation,
             attempt,
             DesktopRecoveryPhase.RebuildStarted);
-        int surfaceCount = coordinator.GetPlannedSurfaceCount(assignments, state.DisplayTopology);
         ApplyGenerationOperation operation = new(
             generation,
             surfaceCount,
@@ -898,18 +993,39 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         DesktopRecoveryRebuildPreparedCommand command,
         CancellationToken cancellationToken)
     {
-        if (command.Generation != state.Generation ||
-            state.DisplayTopology?.Revision != command.Prepared.DisplayTopologyRevision)
+        if (command.Generation != state.Generation)
         {
             CompleteSupersededApply(command.Generation);
             TrackRetirement(command.Prepared.Sessions, CancellationToken.None);
+            CompleteSupersededRecovery(command.Generation);
+            return HostCommandResult.Success(state.Revision);
+        }
+        if (IsSessionCommitBlocked(command.Generation))
+        {
+            CancelSessionApply(command.Generation);
+            TrackRetirement(command.Prepared.Sessions, CancellationToken.None);
+            deferredSessionShellChange = true;
             desktopRecoveryInProgress = false;
-            CompleteActiveRecovery(
-                state.Generation,
-                DesktopRecoveryTerminalState.Cancelled,
-                null,
-                ApplyFailureReason.Superseded,
-                "Desktop recovery rebuild was superseded by current Host state.");
+            CompleteActiveRecovery(command.Generation, DesktopRecoveryTerminalState.Cancelled,
+                null, ApplyFailureReason.SessionUnavailable, "Session disconnected before rebuild commit.");
+            return HostCommandResult.Reject(state.Revision, "host.session.presentation_blocked");
+        }
+        if (state.DisplayTopology?.Revision != command.Prepared.DisplayTopologyRevision)
+        {
+            CompleteSupersededApply(command.Generation);
+            SessionRetirementBatchResult cleanup = await ObserveRetirementAsync(
+                command.Prepared.Sessions, CancellationToken.None).ConfigureAwait(false);
+            if (command.Generation == state.Generation && activeRecoveryOperation is not null)
+            {
+                if (!cleanup.OwnedResourcesCleaned)
+                {
+                    desktopRecoveryInProgress = false;
+                    desktopRecoveryCircuitOpen = true;
+                    CompleteActiveRecovery(command.Generation, DesktopRecoveryTerminalState.Failed,
+                        null, ApplyFailureReason.CleanupFailed, "Superseded recovery batch cleanup failed.");
+                }
+                else ScheduleRecoveryRebuild(command.Generation, 1, cancellationToken);
+            }
             return HostCommandResult.Success(state.Revision);
         }
 
@@ -987,11 +1103,20 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         if (command.Generation != state.Generation)
         {
             CompleteSupersededApply(command.Generation);
+            CompleteSupersededRecovery(command.Generation);
             return HostCommandResult.Success(state.Revision);
         }
 
         if (command.TerminalState == ApplyGenerationTerminalState.Cancelled)
         {
+            if (recoveryTopologyDirty && !IsSessionCommitBlocked(command.Generation))
+            {
+                FindApplyOperation(command.Generation)?.Fail(command.Phase,
+                    ApplyFailureReason.Superseded, "Recovery preparation was superseded by a newer topology.",
+                    ApplyGenerationTerminalState.Cancelled);
+                ScheduleRecoveryRebuild(command.Generation, 1, cancellationToken);
+                return HostCommandResult.Success(state.Revision);
+            }
             FindApplyOperation(command.Generation)?.Fail(
                 command.Phase,
                 command.FailureReason,
@@ -1060,17 +1185,20 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             expectedGeneration,
             attempt,
             DesktopRecoveryPhase.RebuildScheduled);
+        activeRecoveryPreparation?.Dispose();
+        activeRecoveryPreparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _ = PostRecoveryRetryAfterDelayAsync(
             expectedGeneration,
             attempt,
-            cancellationToken);
+            activeRecoveryPreparation.Token);
     }
 
     private async Task<HostCommandResult> SetTopologyAsync(
         DisplayTopologyChangedCommand command,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DisplayTopology? deferredPrevious = null)
     {
-        DisplayTopology? previous = state.DisplayTopology;
+        DisplayTopology? previous = deferredPrevious ?? state.DisplayTopology;
         if (previous is null)
         {
             state.SetDisplayTopology(command.Topology);
@@ -1079,6 +1207,38 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         if (command.Topology.Revision <= previous.Revision)
         {
             return HostCommandResult.Reject(state.Revision, "host.display.topology_stale");
+        }
+
+        if (state.SystemState.IsSessionDisconnected)
+        {
+            deferredSessionTopology ??= previous;
+            state.SetDisplayTopology(command.Topology);
+            return HostCommandResult.Success(state.Revision, state.Snapshot());
+        }
+
+        if (desktopRecoveryInProgress && activeRecoveryOperation is not null)
+        {
+            // Shell invalidation takes precedence: never resize or prepare a partial
+            // topology batch using uncertain old-generation Surface/Renderer resources.
+            activeDisplayReconciliationOperation?.Complete(
+                DisplayReconciliationTerminalState.Cancelled, state.Generation,
+                ApplyFailureReason.Superseded, "A newer topology joined the Shell recovery transaction.");
+            state.SetDisplayTopology(command.Topology);
+            DisplayReconciliationOperation joined = new(command.Topology.Revision,
+                command.Topology.Displays.Count == 0
+                    ? DisplayReconciliationKind.Suspend : DisplayReconciliationKind.Reconfigure);
+            joined.Record(DisplayReconciliationPhase.PlanCreated, state.Generation,
+                command.Topology.Displays.Select(display => display.Id).ToArray(),
+                detail: "Coalesced into the active Shell recovery; only the latest revision may commit.");
+            displayReconciliationOperations.TryAdd(command.Topology.Revision, joined);
+            activeDisplayReconciliationOperation = joined;
+            activeDisplayReconciliationGeneration = null;
+            PruneCompletedDisplayReconciliations(command.Topology.Revision);
+            recoveryTopologyPending = true;
+            recoveryTopologyDirty = true;
+            activeRecoveryPreparation?.Cancel();
+            FindApplyOperation(state.Generation)?.CancelPreparation();
+            return HostCommandResult.Success(state.Revision, state.Snapshot());
         }
 
         // A newer accepted topology revision always owns preparation. Cancel the exact
@@ -1361,6 +1521,15 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         DisplayReconciliationPreparedCommand command,
         CancellationToken cancellationToken)
     {
+        if (IsSessionCommitBlocked(command.Generation))
+        {
+            CancelSessionApply(command.Generation);
+            TrackRetirement(command.Prepared.Sessions, CancellationToken.None);
+            CompleteDisplayReconciliation(command.Prepared.DisplayTopologyRevision,
+                DisplayReconciliationTerminalState.Cancelled, command.Generation,
+                ApplyFailureReason.SessionUnavailable, "Session disconnected before topology commit.");
+            return HostCommandResult.Reject(state.Revision, "host.session.presentation_blocked");
+        }
         if (command.Generation != state.Generation ||
             state.DisplayTopology?.Revision != command.Prepared.DisplayTopologyRevision)
         {
@@ -1513,10 +1682,11 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         return HostCommandResult.Reject(state.Revision, command.ErrorCode);
     }
 
-    private HostCommandResult SetSystemState(
+    private async Task<HostCommandResult> SetSystemStateAsync(
         SystemStateChangedCommand command,
         CancellationToken cancellationToken)
     {
+        bool wasDisconnected = state.SystemState.IsSessionDisconnected;
         bool snapshotChanged = state.SystemState != command.Change.Snapshot;
         if (!state.TrySetSystemState(
                 command.Change.Revision,
@@ -1525,9 +1695,221 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         {
             return HostCommandResult.Success(state.Revision, state.Snapshot());
         }
-        if (snapshotChanged)
+        if (snapshotChanged && !(wasDisconnected && !state.SystemState.IsSessionDisconnected))
         {
             ApplyPlaybackPolicy(null, cancellationToken);
+        }
+        if (state.SystemState.IsSessionDisconnected &&
+            (!wasDisconnected || command.Change.Reason == SystemStateChangeReason.SessionDisconnected))
+        {
+            activeSessionEnvironmentOperation?.Complete(SessionEnvironmentTerminalState.Cancelled,
+                reason: SessionEnvironmentFailureReason.SessionDisconnected);
+            deferredSessionTopology ??= state.DisplayTopology;
+            foreach ((long generation, ApplyGenerationOperation operation) in applyOperations)
+            {
+                if (!operation.Completion.IsCompleted)
+                {
+                    sessionBlockedGenerations.Add(generation);
+                    CancelSessionApply(generation);
+                }
+            }
+            if (state.GetAssignments().Count == 0 && pendingApplyAssignments is not null)
+            {
+                state.RestoreAssignments(pendingApplyAssignments);
+            }
+            if (desktopRecoveryInProgress)
+            {
+                sessionBlockedGenerations.Add(state.Generation);
+                deferredSessionShellChange = true;
+                activeRecoveryPreparation?.Cancel();
+            }
+            if (activeDisplayReconciliationOperation is not null)
+            {
+                deferredSessionShellChange = true;
+                CompleteDisplayReconciliation(activeDisplayReconciliationOperation.TopologyRevision,
+                    DisplayReconciliationTerminalState.Cancelled,
+                    activeDisplayReconciliationGeneration, ApplyFailureReason.SessionUnavailable,
+                    "Session disconnected during topology preparation.");
+            }
+        }
+        else if (wasDisconnected && !state.SystemState.IsSessionDisconnected)
+        {
+            if (activeSessionEnvironmentOperation is null ||
+                activeSessionEnvironmentOperation.Completion.IsCompleted)
+            {
+                BeginSessionEnvironmentOperation(command.Change.Revision);
+            }
+            if (desktopRecoveryInProgress && activeRecoveryOperation is not null)
+            {
+                _ = ContinueReconnectAfterRecoveryAsync(activeRecoveryOperation.Completion,
+                    activeSessionEnvironmentOperation!.ValidationRevision);
+                return HostCommandResult.Success(state.Revision, state.Snapshot());
+            }
+            return await ContinueSessionReconnectAsync(
+                new ContinueSessionReconnectCommand(activeSessionEnvironmentOperation!.ValidationRevision),
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (command.Change.Reason == SystemStateChangeReason.SessionReconnectRequested)
+        {
+            BeginSessionEnvironmentOperation(command.Change.Revision);
+        }
+        return HostCommandResult.Success(state.Revision, state.Snapshot());
+    }
+
+    private bool IsSessionCommitBlocked(long generation) =>
+        state.SystemState.IsSessionDisconnected || sessionBlockedGenerations.Contains(generation);
+
+    private void CancelSessionApply(long generation)
+    {
+        ApplyGenerationOperation? operation = FindApplyOperation(generation);
+        if (operation is null || operation.Completion.IsCompleted)
+        {
+            return;
+        }
+        operation.CancelPreparation();
+        operation.Fail(operation.CurrentPhase, ApplyFailureReason.SessionUnavailable,
+            "Session disconnected before presentation commit.", ApplyGenerationTerminalState.Cancelled);
+    }
+
+    private void BeginSessionEnvironmentOperation(long revision)
+    {
+        activeSessionEnvironmentOperation?.Complete(SessionEnvironmentTerminalState.Cancelled,
+            reason: SessionEnvironmentFailureReason.Superseded);
+        SessionEnvironmentOperation operation = new(revision);
+        sessionEnvironmentOperations[revision] = operation;
+        activeSessionEnvironmentOperation = operation;
+        foreach (long stale in sessionEnvironmentOperations
+                     .Where(item => item.Value.Completion.IsCompleted)
+                     .OrderByDescending(item => item.Key).Skip(31).Select(item => item.Key).ToArray())
+        {
+            sessionEnvironmentOperations.TryRemove(stale, out _);
+        }
+    }
+
+    private async Task ContinueReconnectAfterRecoveryAsync(Task<DesktopRecoveryResult> recovery, long revision)
+    {
+        try
+        {
+            await recovery.WaitAsync(shutdown.Token).ConfigureAwait(false);
+            await PostInternalAsync(new ContinueSessionReconnectCommand(revision), shutdown.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+    }
+
+    private async Task<HostCommandResult> ContinueSessionReconnectAsync(
+        ContinueSessionReconnectCommand command, CancellationToken cancellationToken)
+    {
+        if (state.SystemState.IsSessionDisconnected ||
+            activeSessionEnvironmentOperation?.ValidationRevision != command.SystemRevision ||
+            activeSessionEnvironmentOperation.Completion.IsCompleted)
+        {
+            return HostCommandResult.Success(state.Revision, state.Snapshot());
+        }
+        DisplayTopology? previous = deferredSessionTopology;
+        deferredSessionTopology = null;
+        if (state.DisplayTopology?.Displays.Count == 0)
+        {
+            deferredSessionShellChange = false;
+            TrackRetirement(state.InvalidateAllSessions(), CancellationToken.None);
+            activeSessionEnvironmentOperation.Complete(SessionEnvironmentTerminalState.Succeeded,
+                SessionEnvironmentPath.Reconfigure);
+            return HostCommandResult.Success(state.Revision, state.Snapshot());
+        }
+        if (deferredSessionShellChange || state.GetPreparedSessions().Count == 0)
+        {
+            deferredSessionShellChange = false;
+            TrackRetirement(state.InvalidateAllSessions(), CancellationToken.None);
+            desktopRecoveryInProgress = false;
+            long recoveryId = checked(state.Generation + 1);
+            HostCommandResult accepted = BeginDesktopRecovery(cancellationToken);
+            if (!accepted.Accepted ||
+                !recoveryOperations.TryGetValue(recoveryId, out DesktopRecoveryOperation? recovery))
+            {
+                activeSessionEnvironmentOperation.Complete(SessionEnvironmentTerminalState.Failed,
+                    SessionEnvironmentPath.Rebuild, SessionEnvironmentFailureReason.RecoveryRejected);
+            }
+            else
+            {
+                _ = ObserveSessionRecoveryAsync(recovery.Completion, command.SystemRevision);
+            }
+            return accepted;
+        }
+        if (previous is not null && state.DisplayTopology is not null &&
+            previous.Revision != state.DisplayTopology.Revision)
+        {
+            long revision = state.DisplayTopology.Revision;
+            HostCommandResult accepted = await SetTopologyAsync(
+                new DisplayTopologyChangedCommand(state.DisplayTopology), cancellationToken, previous)
+                .ConfigureAwait(false);
+            if (displayReconciliationOperations.TryGetValue(revision, out DisplayReconciliationOperation? operation))
+            {
+                if (operation.Kind == DisplayReconciliationKind.NoChange)
+                {
+                    // The topology revision changed, but no Surface transaction was
+                    // necessary. Releasing the session gate must still restore policy.
+                    ApplyPlaybackPolicy(null, cancellationToken);
+                }
+                _ = ObserveSessionReconciliationAsync(operation.Completion, command.SystemRevision);
+            }
+            else
+            {
+                activeSessionEnvironmentOperation.Complete(SessionEnvironmentTerminalState.Failed,
+                    SessionEnvironmentPath.Reconfigure, SessionEnvironmentFailureReason.ReconciliationRejected);
+            }
+            return accepted;
+        }
+        ApplyPlaybackPolicy(null, cancellationToken);
+        activeSessionEnvironmentOperation.Complete(SessionEnvironmentTerminalState.Succeeded,
+            SessionEnvironmentPath.Resume);
+        return HostCommandResult.Success(state.Revision, state.Snapshot());
+    }
+
+    private async Task ObserveSessionRecoveryAsync(Task<DesktopRecoveryResult> pending, long revision)
+    {
+        DesktopRecoveryResult result = await pending.ConfigureAwait(false);
+        if (!TryPost(new SessionEnvironmentCompletedCommand(revision,
+            SessionEnvironmentPath.Rebuild, result.TerminalState == DesktopRecoveryTerminalState.Succeeded,
+            result.TerminalState == DesktopRecoveryTerminalState.Succeeded
+                ? SessionEnvironmentFailureReason.None : SessionEnvironmentFailureReason.RecoveryFailed)))
+        {
+            sessionEnvironmentOperations[revision].Complete(SessionEnvironmentTerminalState.Cancelled,
+                reason: SessionEnvironmentFailureReason.HostStopping);
+        }
+    }
+
+    private async Task ObserveSessionReconciliationAsync(Task<DisplayReconciliationResult> pending, long revision)
+    {
+        DisplayReconciliationResult result = await pending.ConfigureAwait(false);
+        if (!TryPost(new SessionEnvironmentCompletedCommand(revision,
+            result.Kind == DisplayReconciliationKind.NoChange ? SessionEnvironmentPath.Resume : SessionEnvironmentPath.Reconfigure,
+            result.TerminalState == DisplayReconciliationTerminalState.Succeeded,
+            result.TerminalState == DisplayReconciliationTerminalState.Succeeded
+                ? SessionEnvironmentFailureReason.None : SessionEnvironmentFailureReason.ReconciliationFailed)))
+        {
+            sessionEnvironmentOperations[revision].Complete(SessionEnvironmentTerminalState.Cancelled,
+                reason: SessionEnvironmentFailureReason.HostStopping);
+        }
+    }
+
+    private HostCommandResult CompleteSessionEnvironment(SessionEnvironmentCompletedCommand command)
+    {
+        if (!state.SystemState.IsSessionDisconnected &&
+            activeSessionEnvironmentOperation?.ValidationRevision == command.SystemRevision)
+        {
+            activeSessionEnvironmentOperation.Complete(command.Succeeded
+                ? SessionEnvironmentTerminalState.Succeeded : SessionEnvironmentTerminalState.Failed,
+                command.Path, command.Reason);
+        }
+        return HostCommandResult.Success(state.Revision, state.Snapshot());
+    }
+
+    private HostCommandResult CompleteSessionEnvironmentFailure(SessionEnvironmentFailedCommand command)
+    {
+        if (state.SystemStateRevision == command.SystemRevision)
+        {
+            activeSessionEnvironmentOperation?.Complete(SessionEnvironmentTerminalState.Failed,
+                reason: command.Reason);
         }
         return HostCommandResult.Success(state.Revision, state.Snapshot());
     }
@@ -1580,6 +1962,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
 
     private HostCommandResult RequestShutdown(CancellationToken cancellationToken)
     {
+        activeSessionEnvironmentOperation?.Complete(SessionEnvironmentTerminalState.Cancelled,
+            reason: SessionEnvironmentFailureReason.HostStopping);
         stopping = true;
         if (!state.RequestShutdown())
         {
@@ -1639,6 +2023,9 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                     0,
                     true));
             state.UpdateSession(session.Session.Id, session.Session.Generation, decision.TargetState);
+            playbackJournal.Record(session.Session.Id.Value, session.Session.Generation,
+                RendererPlaybackEvidenceKind.PolicyDecided, nameof(ChangeRendererState),
+                decision.TargetState, decision.Reason);
             _ = SendPlaybackDecisionAsync(session.Session.Id, decision, cancellationToken);
         }
     }
@@ -1740,13 +2127,14 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         long generation,
         CancellationToken cancellationToken)
     {
+        DesktopRecoveryOperation? observedOperation = activeRecoveryOperation;
         try
         {
             PreparedRecovery recovery = await coordinator.PrepareRecoveryAsync(
                     activeSessions,
                     topology,
                     generation,
-                    milestone => activeRecoveryOperation?.Record(
+                    milestone => observedOperation?.Record(
                         milestone.HostGeneration,
                         0,
                         milestone.Phase,
@@ -1759,14 +2147,14 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                 .ConfigureAwait(false);
             await PostInternalAsync(
                     new DesktopRecoveryPreparedCommand(generation, recovery),
-                    cancellationToken)
+                    CancellationToken.None)
                 .ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception)
         {
             DesktopRecoveryStageException? staged =
                 exception as DesktopRecoveryStageException;
-            activeRecoveryOperation?.Record(
+            observedOperation?.Record(
                 generation,
                 0,
                 staged?.Phase ?? DesktopRecoveryPhase.BatchAbandoned,
@@ -1775,7 +2163,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                 outcome: ApplyStageOutcome.Rejected,
                 failureReason: staged?.Reason ?? ApplyFailureReason.Unexpected,
                 detail: exception.Message);
-            activeRecoveryOperation?.Record(
+            observedOperation?.Record(
                 generation,
                 0,
                 DesktopRecoveryPhase.BatchAbandoned,
@@ -1787,7 +2175,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                         exception.Message,
                         staged?.Phase ?? DesktopRecoveryPhase.BatchAbandoned,
                         staged?.Reason ?? ApplyFailureReason.Unexpected),
-                    cancellationToken)
+                    CancellationToken.None)
                 .ConfigureAwait(false);
         }
     }
@@ -2053,6 +2441,9 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            if (!shutdown.IsCancellationRequested)
+                await PostInternalAsync(new RetryDesktopRecoveryCommand(expectedGeneration, attempt),
+                    CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -2067,19 +2458,28 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             return;
         }
 
-        await prepared.Renderer.SendAsync(
-                new ChangeRendererState(prepared.Session.Generation, decision.TargetState),
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (decision.TargetState == PlaybackState.Throttled)
+        try
         {
             await prepared.Renderer.SendAsync(
-                    new ThrottleRenderer(
-                        prepared.Session.Generation,
-                        decision.FramesPerSecond,
-                        decision.Quality),
+                    new ChangeRendererState(prepared.Session.Generation, decision.TargetState),
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (decision.TargetState == PlaybackState.Throttled)
+            {
+                await prepared.Renderer.SendAsync(
+                        new ThrottleRenderer(
+                            prepared.Session.Generation,
+                            decision.FramesPerSecond,
+                            decision.Quality),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            playbackJournal.Record(sessionId.Value, prepared.Session.Generation,
+                RendererPlaybackEvidenceKind.WriteFailed, nameof(ChangeRendererState),
+                decision.TargetState, decision.Reason, exception.GetType().Name);
         }
     }
 
@@ -2087,6 +2487,18 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         applyOperations.TryGetValue(generation, out ApplyGenerationOperation? operation)
             ? operation
             : null;
+
+    private void CompleteSupersededRecovery(long generation)
+    {
+        // A stale callback may finish its own journal, never the newer transaction's.
+        if (activeRecoveryOperation?.Snapshot().Any(item => item.HostGeneration == generation) != true)
+            return;
+        if (activeRecoveryOperation.Snapshot().Any(item => item.HostGeneration == state.Generation))
+            return;
+        desktopRecoveryInProgress = false;
+        CompleteActiveRecovery(generation, DesktopRecoveryTerminalState.Cancelled, null,
+            ApplyFailureReason.Superseded, "Recovery was superseded by a newer Host generation.");
+    }
 
     private void CompleteActiveRecovery(
         long finalHostGeneration,
@@ -2102,7 +2514,30 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             completionMode,
             failureReason,
             detail);
+        if (recoveryTopologyPending && activeDisplayReconciliationOperation is not null)
+        {
+            if (terminalState == DesktopRecoveryTerminalState.Succeeded &&
+                operation?.Snapshot().Any(item => item.HostGeneration == finalHostGeneration &&
+                    item.Phase == DesktopRecoveryPhase.SurfacesReplaced &&
+                    item.Outcome == ApplyStageOutcome.Success) == true)
+                activeDisplayReconciliationOperation.Record(DisplayReconciliationPhase.SurfacesReplaced,
+                    finalHostGeneration, state.GetPreparedSessions()
+                        .SelectMany(session => session.Session.Displays).Distinct().ToArray(),
+                    detail: "One atomic replacement committed by the shared Shell recovery transaction.");
+            activeDisplayReconciliationOperation.Complete(terminalState switch
+            {
+                DesktopRecoveryTerminalState.Succeeded => DisplayReconciliationTerminalState.Succeeded,
+                DesktopRecoveryTerminalState.Cancelled => DisplayReconciliationTerminalState.Cancelled,
+                _ => DisplayReconciliationTerminalState.Failed,
+            }, finalHostGeneration, failureReason, detail);
+            activeDisplayReconciliationOperation = null;
+            activeDisplayReconciliationGeneration = null;
+        }
+        recoveryTopologyPending = false;
+        recoveryTopologyDirty = false;
         activeRecoveryOperation = null;
+        activeRecoveryPreparation?.Dispose();
+        activeRecoveryPreparation = null;
     }
 
     private void CompleteActiveDisplayReconciliation(long? hostGeneration)
@@ -2151,6 +2586,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
 
     private void PruneCompletedApplyOperations(long currentGeneration)
     {
+        sessionBlockedGenerations.RemoveWhere(generation => generation < currentGeneration);
         long[] completed = applyOperations
             .Where(item => item.Key != currentGeneration && item.Value.Completion.IsCompleted)
             .OrderByDescending(item => item.Key)
@@ -2162,6 +2598,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             if (applyOperations.TryRemove(generation, out ApplyGenerationOperation? operation))
             {
                 operation.Dispose();
+                sessionBlockedGenerations.Remove(generation);
             }
         }
     }

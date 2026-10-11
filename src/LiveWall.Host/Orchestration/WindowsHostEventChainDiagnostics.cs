@@ -58,6 +58,23 @@ public enum WindowsHostSystemTransitionKind
 {
     SessionLock,
     SleepResume,
+    SessionReconnect,
+}
+
+public sealed record SessionReconnectEvidence(long ValidationRevision, string TerminalState,
+    string? Path, string FailureReason, TimeSpan Elapsed);
+
+public sealed record SessionNotificationEvidence(long Sequence, string Kind,
+    bool CurrentSessionMatches, long SystemRevisionBeforeEvent, bool HostStopping, TimeSpan Elapsed);
+
+public sealed class SystemTransitionDiagnosticException(
+    string phase, Exception innerException, SessionReconnectEvidence? sessionReconnect,
+    IReadOnlyList<SessionNotificationEvidence> notifications)
+    : Exception($"System transition failed during {phase}: {innerException.Message}", innerException)
+{
+    public string Phase { get; } = phase;
+    public SessionReconnectEvidence? SessionReconnect { get; } = sessionReconnect;
+    public IReadOnlyList<SessionNotificationEvidence> Notifications { get; } = notifications;
 }
 
 public sealed record WindowsHostSystemTransitionRequest(
@@ -67,7 +84,8 @@ public sealed record WindowsHostSystemTransitionRequest(
     WindowsHostSystemTransitionKind TransitionKind,
     TimeSpan TransitionTimeout,
     TimeSpan RecoveredVisibleDuration,
-    Action? Armed = null);
+    Action? Armed = null,
+    bool PauseBeforeTransition = false);
 
 public sealed record WindowsHostSystemTransitionResult(
     WindowsHostSystemTransitionKind TransitionKind,
@@ -81,9 +99,18 @@ public sealed record WindowsHostSystemTransitionResult(
     int FinalRetirementCount,
     bool SessionIdentityPreserved,
     IReadOnlyList<SystemStateChange> SystemStateTimeline,
-    bool OwnedResourcesCleaned);
+    bool OwnedResourcesCleaned,
+    IReadOnlyList<RendererPlaybackEvidence> PlaybackEvidence,
+    IReadOnlyList<RendererPlaybackEvidence> PolicyEvidence,
+    IReadOnlyList<SessionRetirementResult> Retirement,
+    bool PlaybackFeedbackValidated,
+    bool UserPausePreserved,
+    IReadOnlyList<DesktopRecoveryResult> Recovery,
+    DisplayReconciliationResult? Reconciliation,
+    SessionReconnectEvidence? SessionReconnect = null,
+    IReadOnlyList<SessionNotificationEvidence>? SessionNotifications = null);
 
-public static class WindowsHostEventChainDiagnostics
+public static partial class WindowsHostEventChainDiagnostics
 {
     private static readonly TimeSpan RecoveryDiscoveryTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan FallbackStabilityWindow = TimeSpan.FromMilliseconds(2300);
@@ -239,6 +266,9 @@ public static class WindowsHostEventChainDiagnostics
             request.DisplayTopology,
             request.DisplaySelection);
         WindowsHostComposition composition = diagnostic.Composition;
+        string phase = "Startup";
+        SessionReconnectEvidence? sessionReconnect = null;
+        long armedNotificationSequence = 0;
         try
         {
             await composition.Runtime.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -260,31 +290,102 @@ public static class WindowsHostEventChainDiagnostics
                     WindowsHostSystemTransitionKind.SleepResume =>
                         (SystemStateChangeReason.SystemSuspending,
                             SystemStateChangeReason.SystemResumed),
+                    WindowsHostSystemTransitionKind.SessionReconnect =>
+                        (SystemStateChangeReason.SessionDisconnected,
+                            SystemStateChangeReason.SessionReconnectRequested),
                     _ => throw new ArgumentOutOfRangeException(
                         nameof(request),
                         request.TransitionKind,
                         "Unknown system transition diagnostic kind."),
                 };
+            long[] initialRecoveryIds = composition.CommandLoop.GetRecoveryOperationIdsForDiagnostics().ToArray();
+            RendererProtocolSession[] initialRenderers = composition.CommandLoop
+                .GetPreparedSessionsForDiagnostics().Select(item => item.Renderer)
+                .OfType<RendererProtocolSession>().ToArray();
+            if (request.PauseBeforeTransition)
+            {
+                await composition.CommandLoop.SendAsync(
+                    new ChangePlaybackIntentCommand(UserPlaybackIntent.Pause), cancellationToken)
+                    .ConfigureAwait(false);
+                using CancellationTokenSource pauseBudget =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                pauseBudget.CancelAfter(TimeSpan.FromSeconds(10));
+                await WaitForPlaybackFeedbackAsync(initialRenderers, PlaybackState.Paused,
+                    pauseBudget.Token).ConfigureAwait(false);
+            }
+            long armedRevision = composition.EventBridge.GetSystemStateHistoryForDiagnostics()
+                .Select(item => item.Revision).DefaultIfEmpty(0).Max();
+            armedNotificationSequence = composition.EventBridge.GetSessionEventHistoryForDiagnostics()
+                .Select(item => item.Sequence).DefaultIfEmpty(0).Max();
             request.Armed?.Invoke();
 
             using CancellationTokenSource timeout =
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(request.TransitionTimeout);
-            await WaitForSystemStateReasonAsync(
+            phase = "AwaitingSuspendEvent";
+            SystemStateChange disconnected = await WaitForSystemStateReasonAsync(
                     composition.EventBridge,
                     suspendedReason,
-                    timeout.Token)
+                    timeout.Token, armedRevision)
                 .ConfigureAwait(false);
-            await WaitForSystemStateReasonAsync(
+            phase = "AwaitingResumeEvent";
+            SystemStateChange reconnect = await WaitForSystemStateReasonAsync(
                     composition.EventBridge,
                     resumedReason,
-                    timeout.Token)
+                    timeout.Token, disconnected.Revision)
                 .ConfigureAwait(false);
+            // Human-operation time does not consume the bounded post-event verification budget.
+            using CancellationTokenSource feedbackBudget =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            feedbackBudget.CancelAfter(
+                ApplyDeadlineBudget.Default.Calculate(Math.Max(1, initialSessions.Length)) * 4 +
+                TimeSpan.FromSeconds(10));
+            phase = "EnvironmentValidation";
+            if (request.TransitionKind == WindowsHostSystemTransitionKind.SessionReconnect)
+            {
+                // Flush the event bridge's preceding command before looking up its operation.
+                await GetStateAsync(composition.CommandLoop, feedbackBudget.Token).ConfigureAwait(false);
+                SessionEnvironmentResult terminal = await composition.CommandLoop
+                    .WaitForSessionEnvironmentAsync(reconnect.Revision, feedbackBudget.Token)
+                    .ConfigureAwait(false);
+                sessionReconnect = new(terminal.ValidationRevision, terminal.State.ToString(),
+                    terminal.Path?.ToString(), terminal.Reason.ToString(), terminal.Elapsed);
+                if (terminal.State != SessionEnvironmentTerminalState.Succeeded)
+                    throw new InvalidOperationException($"Session validation {terminal.ValidationRevision}: " +
+                        $"{terminal.State}/{terminal.Reason}.");
+            }
+            // A resumed system snapshot alone is not proof that an environment
+            // transaction finished. Wait on its explicit terminal before inspecting playback.
+            HostStateSnapshot environment = await GetStateAsync(composition.CommandLoop, feedbackBudget.Token)
+                .ConfigureAwait(false);
+            List<DesktopRecoveryResult> recovery = [];
+            foreach (long id in composition.CommandLoop.GetRecoveryOperationIdsForDiagnostics()
+                         .Except(initialRecoveryIds))
+            {
+                recovery.Add(await composition.CommandLoop.WaitForDesktopRecoveryAsync(id, feedbackBudget.Token)
+                    .ConfigureAwait(false));
+            }
+            DisplayReconciliationResult? reconciliation = null;
+            if (environment.DisplayTopology is not null &&
+                environment.DisplayTopology.Revision != initial.DisplayTopology?.Revision)
+            {
+                reconciliation = await composition.CommandLoop.WaitForDisplayReconciliationAsync(
+                    environment.DisplayTopology.Revision, feedbackBudget.Token).ConfigureAwait(false);
+            }
+            PlaybackState expectedState = request.PauseBeforeTransition
+                ? PlaybackState.Paused : PlaybackState.Playing;
+            phase = "PlaybackFeedback";
             HostStateSnapshot resumed = await WaitForPlayingSessionsAsync(
                     composition.CommandLoop,
                     initialSessions.Length,
-                    timeout.Token)
+                    feedbackBudget.Token,
+                    expectedState)
                 .ConfigureAwait(false);
+            RendererProtocolSession[] finalRenderers = composition.CommandLoop
+                .GetPreparedSessionsForDiagnostics().Select(item => item.Renderer)
+                .OfType<RendererProtocolSession>().ToArray();
+            await WaitForPlaybackFeedbackAsync(finalRenderers, expectedState,
+                feedbackBudget.Token).ConfigureAwait(false);
             await Task.Delay(request.RecoveredVisibleDuration, cancellationToken)
                 .ConfigureAwait(false);
 
@@ -294,7 +395,17 @@ public static class WindowsHostEventChainDiagnostics
                 .GetSystemStateHistoryForDiagnostics();
             long finalReplaceCount = composition.DesktopHost.ReplacementCountForDiagnostics;
             int finalRetirementCount = CountRetirements(composition.CommandLoop);
+            phase = "Retirement";
             await composition.Runtime.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            RendererPlaybackEvidence[] playback = initialRenderers.Union(finalRenderers)
+                .SelectMany(item => item.GetPlaybackEvidenceForDiagnostics()).ToArray();
+            bool feedbackValidated = initialRenderers.All(renderer =>
+                    HasCompletedPlaybackExchange(renderer.GetPlaybackEvidenceForDiagnostics(),
+                        PlaybackState.Suspended)) &&
+                finalRenderers.All(renderer => HasCompletedPlaybackExchange(
+                    renderer.GetPlaybackEvidenceForDiagnostics(), expectedState)) &&
+                initialRenderers.Length == initialSessions.Length &&
+                finalRenderers.Length == finalSessions.Length;
             return new WindowsHostSystemTransitionResult(
                 request.TransitionKind,
                 timeline.Any(item => item.Reason == suspendedReason),
@@ -307,7 +418,32 @@ public static class WindowsHostEventChainDiagnostics
                 finalRetirementCount,
                 SameSessions(initialSessions, finalSessions),
                 timeline,
-                composition.DesktopHost.OwnedSurfaceCountForDiagnostics == 0);
+                composition.DesktopHost.OwnedSurfaceCountForDiagnostics == 0,
+                playback,
+                composition.CommandLoop.GetPlaybackPolicyEvidenceForDiagnostics(),
+                composition.CommandLoop.GetRetirementHistoryForDiagnostics()
+                    .SelectMany(batch => batch.Sessions).ToArray(),
+                feedbackValidated,
+                !request.PauseBeforeTransition || resumed.Sessions.All(item =>
+                    item.UserIntent == UserPlaybackIntent.Pause &&
+                    item.Session.State == PlaybackState.Paused),
+                recovery.ToArray(),
+                reconciliation,
+                sessionReconnect,
+                composition.EventBridge.GetSessionEventHistoryForDiagnostics()
+                    .Where(item => item.Sequence > armedNotificationSequence)
+                    .Select(item => new SessionNotificationEvidence(item.Sequence, item.Kind.ToString(),
+                        item.CurrentSessionMatches, item.SystemRevisionBeforeEvent, item.HostStopping,
+                        item.Elapsed)).ToArray());
+        }
+        catch (Exception exception)
+        {
+            throw new SystemTransitionDiagnosticException(phase, exception, sessionReconnect,
+                composition.EventBridge.GetSessionEventHistoryForDiagnostics()
+                    .Where(item => item.Sequence > armedNotificationSequence)
+                    .Select(item => new SessionNotificationEvidence(item.Sequence, item.Kind.ToString(),
+                        item.CurrentSessionMatches, item.SystemRevisionBeforeEvent, item.HostStopping,
+                        item.Elapsed)).ToArray());
         }
         finally
         {
@@ -315,10 +451,24 @@ public static class WindowsHostEventChainDiagnostics
         }
     }
 
+    public static bool HasValidatedSessionReconnect(SessionReconnectEvidence? terminal,
+        IReadOnlyList<SessionNotificationEvidence>? notifications)
+    {
+        if (terminal is not { TerminalState: "Succeeded", FailureReason: "None" } ||
+            terminal.Path is not ("Resume" or "Reconfigure" or "Rebuild") || notifications is null)
+            return false;
+        return notifications.Any(disconnect => disconnect.CurrentSessionMatches && !disconnect.HostStopping &&
+            disconnect.Kind == "SessionDisconnected" && notifications.Any(reconnect =>
+                reconnect.CurrentSessionMatches && !reconnect.HostStopping &&
+                reconnect.Kind == "SessionReconnected" && reconnect.Sequence > disconnect.Sequence &&
+                reconnect.SystemRevisionBeforeEvent < terminal.ValidationRevision));
+    }
+
     private static DiagnosticComposition CreateComposition(
         string rendererExecutablePath,
         DisplayTopology topology,
-        ProductCandidateDisplaySelection selection)
+        ProductCandidateDisplaySelection selection,
+        IRendererProcessLauncher? processLauncher = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rendererExecutablePath);
         ArgumentNullException.ThrowIfNull(topology);
@@ -329,7 +479,7 @@ public static class WindowsHostEventChainDiagnostics
             AppContext.BaseDirectory,
             new CompatibilityReport(CompatibilityGrade.Native, []));
         DiagnosticWallpaperRepository repository = new(entry);
-        RendererProcessProvider provider = CreateRendererProvider(rendererExecutablePath);
+        RendererProcessProvider provider = CreateRendererProvider(rendererExecutablePath, processLauncher);
         DisplayId[] displayIds = RendererProductCandidateDiagnostics.ResolveDisplayIds(
                 topology,
                 selection)
@@ -355,7 +505,8 @@ public static class WindowsHostEventChainDiagnostics
         return new DiagnosticComposition(composition, provider);
     }
 
-    private static RendererProcessProvider CreateRendererProvider(string executablePath) =>
+    private static RendererProcessProvider CreateRendererProvider(string executablePath,
+        IRendererProcessLauncher? processLauncher = null) =>
         new(new RendererProcessProviderOptions(
             new RendererDescriptor(
                 new RendererId("renderer-child-dcomp-probe"),
@@ -366,7 +517,7 @@ public static class WindowsHostEventChainDiagnostics
             "diagnostics",
             ["HwndChild", "DirectComposition"],
             "en-US",
-            TimeSpan.FromSeconds(10)));
+            TimeSpan.FromSeconds(10)), processLauncher);
 
     private static WallpaperDefinition CreateSyntheticWallpaper() => new(
         new WallpaperId("diagnostic.synthetic.color"),
@@ -450,14 +601,17 @@ public static class WindowsHostEventChainDiagnostics
         }
     }
 
-    private static async Task WaitForSystemStateReasonAsync(
+    private static async Task<SystemStateChange> WaitForSystemStateReasonAsync(
         WindowsDesktopEventBridge eventBridge,
         SystemStateChangeReason reason,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long afterRevision = 0)
     {
-        while (!eventBridge.GetSystemStateHistoryForDiagnostics()
-                   .Any(item => item.Reason == reason))
+        while (true)
         {
+            SystemStateChange? change = eventBridge.GetSystemStateHistoryForDiagnostics()
+                .FirstOrDefault(item => item.Reason == reason && item.Revision > afterRevision);
+            if (change is not null) return change;
             cancellationToken.ThrowIfCancellationRequested();
             await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken)
                 .ConfigureAwait(false);
@@ -467,7 +621,8 @@ public static class WindowsHostEventChainDiagnostics
     private static async Task<HostStateSnapshot> WaitForPlayingSessionsAsync(
         HostCommandLoop commandLoop,
         int expectedSessionCount,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PlaybackState expectedState = PlaybackState.Playing)
     {
         while (true)
         {
@@ -475,12 +630,44 @@ public static class WindowsHostEventChainDiagnostics
             HostStateSnapshot state = await GetStateAsync(commandLoop, cancellationToken)
                 .ConfigureAwait(false);
             if (state.Sessions.Count == expectedSessionCount &&
-                state.Sessions.All(item => item.Session.State == PlaybackState.Playing))
+                state.Sessions.All(item => item.Session.State == expectedState))
             {
                 return state;
             }
             await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken)
                 .ConfigureAwait(false);
+        }
+    }
+
+    internal static bool HasCompletedPlaybackExchange(
+        IReadOnlyList<RendererPlaybackEvidence> evidence, PlaybackState state)
+    {
+        // Feedback can race WriteCompleted. Compare with WriteStarted; require both
+        // successful write and independently received feedback in the same generation.
+        return evidence.Any(start => start.Kind == RendererPlaybackEvidenceKind.WriteStarted &&
+            start.State == state && evidence.Any(write =>
+                write.Kind == RendererPlaybackEvidenceKind.WriteCompleted &&
+                write.Generation == start.Generation && write.SessionId == start.SessionId &&
+                write.State == state && write.Sequence > start.Sequence) &&
+            evidence.Any(feedback => feedback.Kind == RendererPlaybackEvidenceKind.FeedbackReceived &&
+                feedback.Generation == start.Generation && feedback.SessionId == start.SessionId &&
+                feedback.State == state && feedback.Sequence > start.Sequence));
+    }
+
+    private static async Task WaitForPlaybackFeedbackAsync(
+        IReadOnlyList<RendererProtocolSession> renderers, PlaybackState state,
+        CancellationToken cancellationToken)
+    {
+        while (!renderers.All(renderer =>
+               {
+                   IReadOnlyList<RendererPlaybackEvidence> evidence =
+                       renderer.GetPlaybackEvidenceForDiagnostics();
+                   return HasCompletedPlaybackExchange(evidence, state) &&
+                       evidence.LastOrDefault(item => item.Kind ==
+                           RendererPlaybackEvidenceKind.FeedbackReceived)?.State == state;
+               }))
+        {
+            await Task.Delay(20, cancellationToken).ConfigureAwait(false);
         }
     }
 

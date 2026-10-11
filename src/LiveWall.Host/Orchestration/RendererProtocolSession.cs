@@ -20,6 +20,10 @@ internal sealed class RendererProtocolSession : IRendererSession
     private int readerClaimed;
     private bool disposed;
     private bool terminalPublished;
+    private readonly RendererPlaybackJournal playbackJournal = new();
+
+    internal IReadOnlyList<RendererPlaybackEvidence> GetPlaybackEvidenceForDiagnostics() =>
+        playbackJournal.Snapshot();
 
     public RendererProtocolSession(
         SessionId id,
@@ -72,7 +76,28 @@ internal sealed class RendererProtocolSession : IRendererSession
             envelope = RendererProtocolMapper.ToEnvelope(Id.Value, command);
         }
 
-        await protocolChannel.WriteAsync(envelope, cancellationToken).ConfigureAwait(false);
+        if (command is ChangeRendererState playback)
+        {
+            playbackJournal.Record(Id.Value, command.Generation,
+                RendererPlaybackEvidenceKind.WriteStarted, envelope.Type, playback.TargetState);
+            try
+            {
+                await protocolChannel.WriteAsync(envelope, cancellationToken).ConfigureAwait(false);
+                playbackJournal.Record(Id.Value, command.Generation,
+                    RendererPlaybackEvidenceKind.WriteCompleted, envelope.Type, playback.TargetState);
+            }
+            catch (Exception exception)
+            {
+                playbackJournal.Record(Id.Value, command.Generation,
+                    RendererPlaybackEvidenceKind.WriteFailed, envelope.Type, playback.TargetState,
+                    failureType: exception.GetType().Name);
+                throw;
+            }
+        }
+        else
+        {
+            await protocolChannel.WriteAsync(envelope, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -138,6 +163,11 @@ internal sealed class RendererProtocolSession : IRendererSession
                 lock (stateGate)
                 {
                     stateMachine.ValidateAndApply(rendererEvent);
+                    if (rendererEvent is RendererPlaybackStateChanged playback)
+                    {
+                        playbackJournal.Record(Id.Value, playback.Generation,
+                            RendererPlaybackEvidenceKind.FeedbackReceived, envelope.Type, playback.State);
+                    }
                 }
 
                 await events.Writer.WriteAsync(rendererEvent, cancellationToken)
@@ -177,6 +207,17 @@ internal sealed class RendererProtocolSession : IRendererSession
         try
         {
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            // Process exit can race a final, already-written ShutdownCompleted frame.
+            // Give the sole receive pump a bounded chance to drain the pipe before
+            // classifying the exit. No feedback is fabricated if draining times out.
+            try
+            {
+                await receiveTask.WaitAsync(TimeSpan.FromSeconds(1), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
             bool isDisposed;
             bool closed;
             lock (stateGate)

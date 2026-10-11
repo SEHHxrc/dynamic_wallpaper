@@ -59,6 +59,13 @@ internal static class SystemStateNativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool UnregisterPowerSettingNotification(nint handle);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern nint RegisterSuspendResumeNotification(nint recipient, uint flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool UnregisterSuspendResumeNotification(nint handle);
+
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int index);
 

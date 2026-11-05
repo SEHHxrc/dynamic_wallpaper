@@ -10,6 +10,13 @@ public enum DisplayReconciliationTerminalState
     Cancelled,
 }
 
+public enum DisplayReconciliationSupersessionCause
+{
+    None,
+    NewerTopology,
+    ShellGenerationChanged,
+}
+
 public enum DisplayReconciliationPhase
 {
     PlanCreated,
@@ -40,7 +47,8 @@ public sealed record DisplayReconciliationResult(
     ApplyFailureReason FailureReason,
     string? Detail,
     TimeSpan Elapsed,
-    IReadOnlyList<DisplayReconciliationTimelineEntry> Timeline);
+    IReadOnlyList<DisplayReconciliationTimelineEntry> Timeline,
+    DisplayReconciliationSupersessionCause SupersessionCause = DisplayReconciliationSupersessionCause.None);
 
 internal sealed class DisplayReconciliationOperation
 {
@@ -63,6 +71,11 @@ internal sealed class DisplayReconciliationOperation
     public DisplayReconciliationKind Kind { get; }
 
     public Task<DisplayReconciliationResult> Completion => completion.Task;
+
+    public IReadOnlyList<DisplayReconciliationTimelineEntry> Snapshot()
+    {
+        lock (gate) { return Array.AsReadOnly(timeline.ToArray()); }
+    }
 
     public void Record(
         DisplayReconciliationPhase phase,
@@ -90,7 +103,8 @@ internal sealed class DisplayReconciliationOperation
         DisplayReconciliationTerminalState state,
         long? hostGeneration,
         ApplyFailureReason failureReason = ApplyFailureReason.None,
-        string? detail = null)
+        string? detail = null,
+        DisplayReconciliationSupersessionCause supersessionCause = DisplayReconciliationSupersessionCause.None)
     {
         lock (gate)
         {
@@ -118,7 +132,8 @@ internal sealed class DisplayReconciliationOperation
                 failureReason,
                 detail,
                 Stopwatch.GetElapsedTime(startedTimestamp),
-                Array.AsReadOnly(timeline.ToArray()));
+                Array.AsReadOnly(timeline.ToArray()),
+                supersessionCause);
             completion.TrySetResult(result);
         }
     }

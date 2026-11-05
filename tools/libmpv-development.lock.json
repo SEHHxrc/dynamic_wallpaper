@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "scope": "DevelopmentOnlyNotForDistribution",
+  "release": "20261021",
+  "architecture": "x86_64",
+  "mpvCommit": "e471496c56",
+  "releaseUrl": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20261021",
+  "archiveUrl": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261021/mpv-dev-x86_64-20261021-git-e471496c56.7z",
+  "archiveFile": "mpv-dev-x86_64-20261021-git-e471496c56.7z",
+  "archiveSha256": "EFC719EFF3DC5954B4A5EFC800632808BCEC01CC9034940DD14E5EB7FE9EA633",
+  "libraryFile": "libmpv-2.dll",
+  "librarySha256": "04E4D27DC385DC18DDD93FBE69C75E635B864F3C6EC53A9122DF54C2F7842F4A",
+  "licenseReview": "Pending; default mpv core GPL-2.0-or-later, actual FFmpeg/dependency configuration must be audited before distribution",
+  "upstreamCopyright": "https://github.com/mpv-player/mpv/blob/e471496c56/Copyright",
+  "clientHeaderLicense": "ISC; does not license the mpv core or FFmpeg",
+  "systemInstallation": false
+}

@@ -24,7 +24,7 @@ public sealed record EnvironmentSurfaceEvidence(string SessionId, int SurfaceOrd
     IReadOnlyList<DisplayId> Displays, DisplayBounds Bounds);
 
 public sealed record RendererCleanupEvidence(string SessionId, bool ExitObserved,
-    bool HandleDisposed, string? Issue);
+    bool HandleDisposed, string? Issue, int? ExitCode = null);
 
 public sealed record WindowsHostEnvironmentRecoveryResult(
     EnvironmentRecoveryClassification Classification, bool PendingAtRestart,
@@ -37,7 +37,10 @@ public sealed record WindowsHostEnvironmentRecoveryResult(
     IReadOnlyList<EnvironmentSurfaceEvidence> FinalSurfaces,
     IReadOnlyList<SessionRetirementResult> Retirement,
     IReadOnlyList<RendererCleanupEvidence> RendererCleanup,
-    bool OwnedResourcesCleaned, bool EventOverflow, bool FinalRevisionValidated);
+    bool OwnedResourcesCleaned, bool EventOverflow, bool FinalRevisionValidated)
+{
+    public IReadOnlyList<EnvironmentRecoveryIssue> ValidationIssues { get; init; } = [];
+}
 
 public sealed class EnvironmentRecoveryDiagnosticException(string phase, Exception inner)
     : Exception($"Environment recovery diagnostic failed during {phase}.", inner)
@@ -57,7 +60,7 @@ public static partial class WindowsHostEventChainDiagnostics
     public static bool HasShellTopologyOverlap(DisplayReconciliationResult first, bool pendingAtRestart) =>
         pendingAtRestart && first.TerminalState == DisplayReconciliationTerminalState.Cancelled &&
         first.FailureReason == ApplyFailureReason.Superseded &&
-        first.Detail?.Contains("confirmed Shell generation", StringComparison.Ordinal) == true;
+        first.SupersessionCause == DisplayReconciliationSupersessionCause.ShellGenerationChanged;
 
     public static async Task<WindowsHostEnvironmentRecoveryResult> RunEnvironmentRecoveryAsync(
         WindowsHostEnvironmentRecoveryRequest request, CancellationToken cancellationToken)
@@ -152,17 +155,9 @@ public static partial class WindowsHostEventChainDiagnostics
                 .ToArray();
             long replacements = composition.DesktopHost.ReplacementCountForDiagnostics - initialReplacements;
             bool finalRevisionValidated = final.DisplayTopology!.Revision == topologies.Max(item => item.Revision);
-            bool overlap = HasShellTopologyOverlap(reconciliations[0], pending);
             var connected = final.DisplayTopology!.Displays.Select(display => display.Id).ToHashSet();
-            int expectedSurfaces = final.Assignments.Count(item => connected.Contains(item.DisplayId));
-            bool terminalsValid = recoveries.All(item => item.TerminalState == DesktopRecoveryTerminalState.Succeeded) &&
-                reconciliations.All(item => item.TerminalState == DisplayReconciliationTerminalState.Succeeded ||
-                    item.TerminalState == DisplayReconciliationTerminalState.Cancelled &&
-                    item.FailureReason == ApplyFailureReason.Superseded);
-            bool geometryValid = surfaces.Length == expectedSurfaces && surfaces.All(surface =>
-                surface.Displays.Count == 1 && final.DisplayTopology.Displays.Any(display =>
-                    display.Id == surface.Displays[0] && display.Bounds == surface.Bounds));
-            bool commitsValid = !overlap || recoveries.Count == 1 && replacements == 1;
+            DisplayId[] expectedDisplays = final.Assignments.Where(item => connected.Contains(item.DisplayId))
+                .Select(item => item.DisplayId).ToArray();
             phase = "ShutdownAndCleanup";
             await composition.Runtime.StopAsync(CancellationToken.None).ConfigureAwait(false);
             RendererCleanupEvidence[] rendererCleanup = tracker.Snapshot();
@@ -170,17 +165,14 @@ public static partial class WindowsHostEventChainDiagnostics
                 rendererCleanup.Length > 0 && rendererCleanup.All(item => item.ExitObserved && item.HandleDisposed && item.Issue is null);
             SessionRetirementResult[] retirement = composition.CommandLoop.GetRetirementHistoryForDiagnostics()
                 .SelectMany(batch => batch.Sessions).ToArray();
-            bool retirementValid = retirement.Length > 0 && retirement.All(item => item.OwnedResourcesCleaned) &&
-                retirement.Where(item => surfaces.Any(surface => surface.SessionId == item.SessionId.Value))
-                    .All(item => item.Graceful && item.Issues.Count == 0);
-            bool valid = terminalsValid && geometryValid && commitsValid && cleaned && retirementValid &&
-                (!restarted || recoveries.Count > 0) && (!overlap || composition.EventBridge.ValidatedShellChangeCount == 1 &&
-                    composition.EventBridge.ForwardedRecoveryCount == 1);
-            return new(ClassifyEnvironmentRecovery(overlap && finalRevisionValidated, valid, overflow != 0), pending, overlap, restarted,
+            WindowsHostEnvironmentRecoveryResult result = new(EnvironmentRecoveryClassification.EnvironmentInconclusive,
+                pending, HasShellTopologyOverlap(reconciliations[0], pending), restarted,
                 initial.Generation, final.Generation, initial.DisplayTopology.Revision, final.DisplayTopology.Revision,
                 replacements, composition.EventBridge.ValidatedShellChangeCount, composition.EventBridge.ForwardedRecoveryCount,
                 topologies.ToArray(), reconciliations.ToArray(), recoveries.ToArray(), surfaces,
                 retirement, rendererCleanup, cleaned, overflow != 0, finalRevisionValidated);
+            EnvironmentRecoveryValidation validation = ValidateEnvironmentRecovery(result, expectedDisplays);
+            return result with { Classification = validation.Classification, ValidationIssues = validation.Issues };
         }
         catch (Exception exception) when (exception is not EnvironmentRecoveryDiagnosticException)
         {
@@ -221,16 +213,18 @@ internal sealed class DiagnosticRendererProcessTracker(IRendererProcessLauncher?
             bool exited = false;
             bool disposed = false;
             string? issue = null;
+            int? exitCode = null;
             try
             {
                 using CancellationTokenSource budget = new(exitBudget);
                 await inner.WaitForExitAsync(budget.Token).ConfigureAwait(false);
                 exited = inner.HasExited;
+                if (exited) exitCode = inner.ExitCode;
             }
             catch (Exception exception) { issue = exception.GetType().Name; }
             try { await inner.DisposeAsync().ConfigureAwait(false); disposed = true; }
             catch (Exception exception) { issue ??= exception.GetType().Name; throw; }
-            finally { Volatile.Write(ref evidence, new(sessionId, exited, disposed, issue)); }
+            finally { Volatile.Write(ref evidence, new(sessionId, exited, disposed, issue, exitCode)); }
         }
     }
 }

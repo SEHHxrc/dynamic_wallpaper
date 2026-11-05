@@ -6,11 +6,13 @@
 
 ## 对外接口
 
+`Lifecycle` 已提供独立隐藏生命周期窗口、有限原生退出等待及 Host/Renderer 进程局部退出顺序，只把事实通知 Host，真正 Stop、持久化和 Renderer 清理仍由 Host 负责。查询结束与取消结束不会启动退出；确认结束/Close 经同一清理任务去重。原生 callback 不占用 Surface 窗口线程，不主动注销或关机。P1.9.5 自动/受控进程、单屏活动 Close、无 Renderer 及活动 Renderer 的真实注销代表项均通过，按有限边界关闭；最后样本收到 ShutdownCompleted、Renderer ExitCode=0、自有 Surface 为零。旧失败样本保留，不声明真实关机/重启或双屏全矩阵通过，Main/实际 Host 退出码仍未观察。详见 `Lifecycle/README.md` 与统一状态台账。
+
 实现 `LiveWall.Application` 中的 `IDesktopHost`、`IDisplayTopologySource`、`ISystemStateSource` 和 `IProcessSupervisor`；`IDesktopHostAdapter` 与 `DesktopAttachmentLease` 是本程序集内部机制。对外只返回 Application/Domain 模型和不含 Shell 句柄的 attachment capability，不暴露 COM 对象或裸原生资源所有权。
 
 `IDesktopHost` 已提供批量 `ReplaceSurfacesAsync`，`CreateSurfaceAsync` 已按约定只创建隐藏 provisional Surface；`ResizeSurfaceAsync` 在显示几何过渡期间调整既有活动容器，Renderer v1 `SetBounds` 同步驱动 child/swap-chain resize。端口与线程机制已有自动化覆盖，但尚未通过真实 Windows Shell 兼容矩阵；以 `docs/windows-desktop-host.md`、`docs/implementation-status.md`、ADR-007 和 ADR-008 为边界。
 
-Shell 兼容诊断已采集完整 build/UBR 和递归窗口结构；生产适配器只允许使用完整 build 键并在每次发现时重新验证结构与 presentation kind。无边框 Host-owned DComp、Renderer-child v1 binding、Explorer generation、P1.6/P1.7 与 P1.8 显示拓扑代表矩阵已经通过。Raised lease 坐标门禁及活动 Host/Renderer 快速 resize 把适配缩短到约 14–34 ms；TG0 证明 DWM 不保证预测区域原子揭示，Guard 不生产化，旋转/扩张保留 `TransientCoverageGap`。Native display snapshot 会重采样暂态不一致，运行期空集合需相隔 350 ms 的连续两次确认。Span 使用物理像素 union、单 Renderer/Surface，position、scale、成员 `2→1→2` 和 `PerDisplay→Span` 实机通过；自有 HWND 使用精确生命周期注册，未削弱第三方竞争检测。P1.9.2 的 WTS/Power 聚合与验证后恢复已通过自动门禁，实机仍待验收。两类生产 allowlist 继续为空；RDP/用户切换、并发恢复和 Shell mutation 矩阵仍未完成。
+Shell 兼容诊断已采集完整 build/UBR 和递归窗口结构；生产适配器只允许使用完整 build 键并在每次发现时重新验证结构与 presentation kind。无边框 Host-owned DComp、Renderer-child v1 binding、Explorer generation、P1.6/P1.7 与 P1.8 显示拓扑代表矩阵已经通过。Raised lease 坐标门禁及活动 Host/Renderer 快速 resize 把适配缩短到约 14–34 ms；TG0 证明 DWM 不保证预测区域原子揭示，Guard 不生产化，旋转/扩张保留 `TransientCoverageGap`。Native display snapshot 会重采样暂态不一致，运行期空集合需相隔 350 ms 的连续两次确认。Span 使用物理像素 union、单 Renderer/Surface，position、scale、成员 `2→1→2` 和 `PerDisplay→Span` 实机通过；自有 HWND 使用精确生命周期注册，未削弱第三方竞争检测。P1.9.2 的 WTS/Power 聚合、验证后恢复自动门禁和物理单屏代表场景已通过，双屏系统恢复待补。RDP 首版 OutOfScope/WaivedForV1，本地用户切换 NotValidated，P1.9.4 真实并发及双屏实机延期，Shell mutation 策略仍待完成。两类生产 allowlist 继续为空。
 
 ## 依赖规则
 

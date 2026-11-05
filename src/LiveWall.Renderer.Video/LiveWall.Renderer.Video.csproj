@@ -3,10 +3,17 @@
     <TargetFramework>net10.0-windows10.0.18362.0</TargetFramework>
     <OutputType>WinExe</OutputType>
     <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <Description>LiveWall 隔离的 libmpv 视频 Renderer 进程。</Description>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\LiveWall.Contracts\LiveWall.Contracts.csproj" />
+    <PackageReference Include="Vortice.Direct3D11" />
+    <PackageReference Include="Vortice.DirectComposition" />
+    <PackageReference Include="Vortice.DXGI" />
+    <Compile Include="..\LiveWall.Infrastructure\Ipc\LengthPrefixedJsonChannel.cs" Link="Protocol\Transport\LengthPrefixedJsonChannel.cs" />
+    <Compile Include="..\LiveWall.Infrastructure\Ipc\LocalNamedPipeFactory.cs" Link="Protocol\Transport\LocalNamedPipeFactory.cs" />
+    <Compile Include="..\LiveWall.Infrastructure\Ipc\ProtocolFrameException.cs" Link="Protocol\Transport\ProtocolFrameException.cs" />
   </ItemGroup>
 </Project>
 

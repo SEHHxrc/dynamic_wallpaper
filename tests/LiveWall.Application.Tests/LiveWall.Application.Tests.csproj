@@ -15,6 +15,10 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="..\..\tools\Shared\ProbeFaultPlan.cs" Link="ProbeFaultPlan.cs" />
+    <Compile Include="..\..\tools\DesktopHostDiagnostics\ActiveSessionEndOptions.cs" Link="ActiveSessionEndOptions.cs" />
+    <Compile Include="..\..\tools\DesktopHostDiagnostics\VideoCandidateOptions.cs" Link="VideoCandidateOptions.cs" />
+    <Compile Include="..\..\tools\Shared\ShellMutationAssessment.cs" Link="ShellMutationAssessment.cs" />
+    <Compile Include="..\..\tools\Shared\VideoCandidateCleanupAssessment.cs" Link="VideoCandidateCleanupAssessment.cs" />
     <ProjectReference Include="..\..\src\LiveWall.Application\LiveWall.Application.csproj" />
     <ProjectReference Include="..\..\src\LiveWall.Domain\LiveWall.Domain.csproj" />
     <ProjectReference Include="..\..\src\LiveWall.Host\LiveWall.Host.csproj" />

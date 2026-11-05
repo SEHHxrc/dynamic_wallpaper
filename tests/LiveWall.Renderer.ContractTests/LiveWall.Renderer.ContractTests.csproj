@@ -18,5 +18,8 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <Compile Include="..\..\src\LiveWall.Renderer.Video\Mpv\*.cs" Link="Mpv\%(Filename)%(Extension)" />
+    <Compile Include="..\..\src\LiveWall.Renderer.Video\Protocol\*.cs" Link="VideoProtocol\%(Filename)%(Extension)" />
+    <Compile Include="..\..\tools\VideoPresentationProbe\SyntheticVideo.cs" Link="SyntheticVideo.cs" />
   </ItemGroup>
 </Project>

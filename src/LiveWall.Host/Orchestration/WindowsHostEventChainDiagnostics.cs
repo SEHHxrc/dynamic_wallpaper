@@ -11,6 +11,7 @@ using LiveWall.Domain.Sessions;
 using LiveWall.Domain.Wallpapers;
 using LiveWall.Host.Bootstrap;
 using LiveWall.Host.CommandLoop;
+using LiveWall.Infrastructure.Configuration;
 
 namespace LiveWall.Host.Orchestration;
 
@@ -468,7 +469,8 @@ public static partial class WindowsHostEventChainDiagnostics
         string rendererExecutablePath,
         DisplayTopology topology,
         ProductCandidateDisplaySelection selection,
-        IRendererProcessLauncher? processLauncher = null)
+        IRendererProcessLauncher? processLauncher = null,
+        string? persistentConfigurationDirectory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rendererExecutablePath);
         ArgumentNullException.ThrowIfNull(topology);
@@ -492,16 +494,17 @@ public static partial class WindowsHostEventChainDiagnostics
                 FitMode.Cover,
                 null))
             .ToArray();
-        InMemoryHostConfigurationStore configurationStore = new(
-            new HostConfiguration(UserPlaybackPolicy.Default, assignments));
+        DiagnosticHostConfigurationStore configurationStore = new(
+            new HostConfiguration(UserPlaybackPolicy.Default, assignments),
+            persistentConfigurationDirectory is null ? null : new JsonHostConfigurationStore(persistentConfigurationDirectory));
         WindowsHostComposition composition = WindowsHostCompositionRoot.CreateComposition(
-            AppContext.BaseDirectory,
+            persistentConfigurationDirectory ?? AppContext.BaseDirectory,
             new WindowsHostCompositionOptions(
                 repository,
                 [provider],
                 DesktopAttachmentPolicy.AllowUnvalidatedRaisedDiagnostics,
                 configurationStore,
-                PersistConfiguration: false));
+                PersistConfiguration: persistentConfigurationDirectory is not null));
         return new DiagnosticComposition(composition, provider);
     }
 
@@ -697,7 +700,8 @@ public static partial class WindowsHostEventChainDiagnostics
             throw new NotSupportedException("Diagnostic repository is read-only.");
     }
 
-    private sealed class InMemoryHostConfigurationStore(HostConfiguration configuration)
+    private sealed class DiagnosticHostConfigurationStore(HostConfiguration configuration,
+        IHostConfigurationStore? persistence = null)
         : IHostConfigurationStore
     {
         public Task<HostConfigurationLoadResult> LoadAsync(CancellationToken cancellationToken) =>
@@ -708,10 +712,10 @@ public static partial class WindowsHostEventChainDiagnostics
 
         public Task SavePlaybackPolicyAsync(
             UserPlaybackPolicy policy,
-            CancellationToken cancellationToken) => Task.CompletedTask;
+            CancellationToken cancellationToken) => persistence?.SavePlaybackPolicyAsync(policy, cancellationToken) ?? Task.CompletedTask;
 
         public Task SaveAssignmentsAsync(
             IReadOnlyList<WallpaperAssignment> assignments,
-            CancellationToken cancellationToken) => Task.CompletedTask;
+            CancellationToken cancellationToken) => persistence?.SaveAssignmentsAsync(assignments, cancellationToken) ?? Task.CompletedTask;
     }
 }

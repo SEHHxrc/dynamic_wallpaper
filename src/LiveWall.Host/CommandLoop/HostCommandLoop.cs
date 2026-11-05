@@ -59,6 +59,18 @@ internal sealed class HostCommandLoop : IAsyncDisposable
     private CancellationTokenSource? activeRecoveryPreparation;
     private bool recoveryTopologyPending;
     private bool recoveryTopologyDirty;
+    private readonly object disposalGate = new();
+    private Task? disposalTask;
+    private bool channelClosed;
+    private HostCommandResult? stoppedResult;
+    private readonly Lock backgroundGate = new();
+    private readonly List<Task> backgroundTasks = [];
+    private readonly List<Exception> backgroundFailures = [];
+    private readonly HashSet<IRendererSession> shutdownRecoveryRenderers = new(ReferenceEqualityComparer.Instance);
+
+    internal IReadOnlyList<DisplayReconciliationTimelineEntry> GetDisplayReconciliationTimelineForDiagnostics(long revision) =>
+        displayReconciliationOperations.TryGetValue(revision, out DisplayReconciliationOperation? operation)
+            ? operation.Snapshot() : [];
 
     internal Task<SessionEnvironmentResult> WaitForSessionEnvironmentAsync(long validationRevision,
         CancellationToken cancellationToken) =>
@@ -86,7 +98,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             SingleWriter = false,
             AllowSynchronousContinuations = false,
         });
-        runTask = RunAsync(shutdown.Token);
+        runTask = RunAsync();
     }
 
     public async Task<HostCommandResult> SendAsync(
@@ -94,17 +106,35 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
+        cancellationToken.ThrowIfCancellationRequested();
         TaskCompletionSource<HostCommandResult> completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        await channel.Writer.WriteAsync(new QueuedHostCommand(command, completion), cancellationToken)
-            .ConfigureAwait(false);
+        lock (disposalGate)
+        {
+            if (channelClosed)
+                return command is ShutdownCommand or GetHostStateCommand ? stoppedResult! :
+                    HostCommandResult.Reject(stoppedResult!.StateRevision, "host.stopped");
+            if (!channel.Writer.TryWrite(new QueuedHostCommand(command, completion)))
+                throw new InvalidOperationException("Host command channel closed unexpectedly.");
+            if (command is ShutdownCommand)
+            {
+                stopping = true;
+                shutdown.Cancel();
+            }
+        }
         return await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public bool TryPost(HostCommand command)
     {
         ArgumentNullException.ThrowIfNull(command);
-        return channel.Writer.TryWrite(new QueuedHostCommand(command, null));
+        lock (disposalGate)
+        {
+            if (channelClosed) return false;
+            bool posted = channel.Writer.TryWrite(new QueuedHostCommand(command, null));
+            if (posted && command is ShutdownCommand) { stopping = true; shutdown.Cancel(); }
+            return posted;
+        }
     }
 
     internal IReadOnlyList<PreparedSession> GetPreparedSessionsForDiagnostics() =>
@@ -242,55 +272,48 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             .ConfigureAwait(false);
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        activeSessionEnvironmentOperation?.Complete(SessionEnvironmentTerminalState.Cancelled,
-            reason: SessionEnvironmentFailureReason.HostStopping);
-        channel.Writer.TryComplete();
-        shutdown.Cancel();
-        if (activeRecoveryOperation is not null)
+        lock (disposalGate)
         {
-            CompleteActiveRecovery(
-                state.Generation,
-                DesktopRecoveryTerminalState.Cancelled,
-                null,
-                ApplyFailureReason.Cancelled,
-                "Host command loop was disposed during desktop recovery.");
+            disposalTask ??= DisposeCoreAsync();
+            return new ValueTask(disposalTask);
         }
-        activeDisplayReconciliationOperation?.Complete(
-            DisplayReconciliationTerminalState.Cancelled,
-            state.Generation,
-            ApplyFailureReason.Cancelled,
-            "Host command loop was disposed during display reconciliation.");
-        if (activeDisplayReconciliationGeneration is long reconciliationGeneration)
-        {
-            CompleteSupersededApply(reconciliationGeneration);
-        }
-        activeDisplayReconciliationOperation = null;
-        activeDisplayReconciliationGeneration = null;
+    }
+
+    private async Task DisposeCoreAsync()
+    {
         try
         {
+            _ = await SendAsync(new ShutdownCommand(), CancellationToken.None).ConfigureAwait(false);
+            // Keep the consumer alive until every producer has transferred its late
+            // prepared batch. A mailbox barrier then finishes cleanup scheduling.
+            while (true)
+            {
+                Task[] pending;
+                lock (backgroundGate) { pending = backgroundTasks.Where(task => !task.IsCompleted).ToArray(); }
+                await Task.WhenAll(pending).ConfigureAwait(false);
+                HostCommandResult barrier = await SendAsync(new GetHostStateCommand(), CancellationToken.None)
+                    .ConfigureAwait(false);
+                lock (backgroundGate)
+                {
+                    if (backgroundTasks.Any(task => !task.IsCompleted)) continue;
+                }
+                lock (disposalGate)
+                {
+                    stoppedResult = barrier;
+                    channelClosed = true;
+                    channel.Writer.TryComplete();
+                }
+                break;
+            }
             await runTask.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
-        {
-        }
-
-        PreparedSession[] activeSessions = state.InvalidateAllSessions().ToArray();
-        if (activeSessions.Length > 0)
-        {
-            TrackRetirement(activeSessions, CancellationToken.None);
-        }
-
-        Task<SessionRetirementBatchResult>[] retirements;
-        lock (retirementGate)
-        {
-            retirements = pendingRetirements.ToArray();
-        }
-
-        try
-        {
-            await Task.WhenAll(retirements).ConfigureAwait(false);
+            _ = await WaitForPendingRetirementsForDiagnosticsAsync(CancellationToken.None).ConfigureAwait(false);
+            lock (backgroundGate)
+            {
+                if (backgroundFailures.Count > 0)
+                    throw new AggregateException("Host background work failed during shutdown.", backgroundFailures);
+            }
         }
         finally
         {
@@ -303,20 +326,26 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         }
     }
 
-    private async Task RunAsync(CancellationToken cancellationToken)
+    private async Task RunAsync()
     {
-        await foreach (QueuedHostCommand queued in channel.Reader.ReadAllAsync(cancellationToken)
+        await foreach (QueuedHostCommand queued in channel.Reader.ReadAllAsync()
                            .ConfigureAwait(false))
         {
             try
             {
-                HostCommandResult result = await HandleAsync(queued.Command, cancellationToken)
+                HostCommandResult result = await HandleAsync(queued.Command, shutdown.Token)
                     .ConfigureAwait(false);
                 queued.Completion?.TrySetResult(result);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (OperationCanceledException exception)
+            {
+                queued.Completion?.TrySetCanceled(exception.CancellationToken);
+                if (queued.Completion is null && !shutdown.IsCancellationRequested) RecordBackgroundFailure(exception);
+            }
+            catch (Exception exception)
             {
                 queued.Completion?.TrySetException(exception);
+                if (queued.Completion is null) RecordBackgroundFailure(exception);
             }
         }
     }
@@ -325,6 +354,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         HostCommand command,
         CancellationToken cancellationToken)
     {
+        if (stopping && !state.ShutdownRequested) RequestShutdown(CancellationToken.None);
         if (state.ShutdownRequested)
         {
             return HandleStoppingAsync(command);
@@ -372,10 +402,10 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             case DesktopRecoveryPreparedCommand recovered:
                 try
                 {
-                    // Shutdown already retired the active/previous Renderer sessions. Only
-                    // abandon the not-yet-committed replacement Surface generation here;
-                    // abandoning the entire recovery would dispose the same Renderer twice.
-                    await coordinator.AbandonSurfacesAsync(
+                    if (recovered.Recovery.Sessions.Any(session => shutdownRecoveryRenderers.Contains(session.Previous.Renderer)))
+                        await coordinator.AbandonRecoveryAsync(recovered.Recovery, CancellationToken.None).ConfigureAwait(false);
+                    else
+                        await coordinator.AbandonSurfacesAsync(
                             recovered.Recovery.Sessions
                                 .SelectMany(session => session.Replacement.Surfaces),
                             CancellationToken.None)
@@ -547,12 +577,12 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         }
         PruneCompletedApplyOperations(generation);
 
-        _ = ObserveApplyPreparationAsync(
+        TrackBackgroundTask(ObserveApplyPreparationAsync(
             assignments,
             state.DisplayTopology,
             generation,
             operation,
-            cancellationToken);
+            cancellationToken));
         return HostCommandResult.Success(state.Revision, state.Snapshot());
     }
 
@@ -591,10 +621,18 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                     replaced.Select(session => session.Prepared).ToArray(),
                     replacementDeadline.Token)
                 .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
         }
         catch (Exception exception)
         {
             ApplyGenerationOperation? operation = FindApplyOperation(command.Generation);
+            if (stopping)
+            {
+                operation?.Fail(ApplyGenerationPhase.SurfacesReplaced, ApplyFailureReason.Cancelled,
+                    "Shutdown interrupted Surface replacement.", ApplyGenerationTerminalState.Cancelled);
+                TrackRetirement(command.Prepared.Sessions, CancellationToken.None);
+                return HostCommandResult.Reject(state.Revision, "host.stopping");
+            }
             bool timedOut = exception is OperationCanceledException &&
                 replacementOperation?.DeadlineToken.IsCancellationRequested == true &&
                 !cancellationToken.IsCancellationRequested;
@@ -692,7 +730,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                 DisplayReconciliationTerminalState.Cancelled,
                 activeDisplayReconciliationGeneration,
                 ApplyFailureReason.Superseded,
-                "Display preparation was superseded by a confirmed Shell generation change.");
+                "Display preparation was superseded by a confirmed Shell generation change.",
+                DisplayReconciliationSupersessionCause.ShellGenerationChanged);
             activeDisplayReconciliationOperation = null;
             activeDisplayReconciliationGeneration = null;
         }
@@ -716,11 +755,11 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             generation,
             0,
             DesktopRecoveryPhase.ShellGenerationObserved);
-        _ = ObserveDesktopRecoveryAsync(
+        TrackBackgroundTask(ObserveDesktopRecoveryAsync(
             state.GetPreparedSessions().OrderBy(session => session.SurfaceOrdinal).ToArray(),
             state.DisplayTopology,
             generation,
-            (activeRecoveryPreparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)).Token);
+            (activeRecoveryPreparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)).Token));
         return HostCommandResult.Success(state.Revision, state.Snapshot());
     }
 
@@ -773,12 +812,22 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             {
                 await coordinator.ReplaceRecoveredSurfacesAsync(recovery, cancellationToken)
                     .ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
             }
             activeRecoveryOperation?.Record(
                 command.Generation,
                 0,
                 DesktopRecoveryPhase.SurfacesReplaced,
                 recovery.Sessions.SelectMany(item => item.Replacement.Session.Displays).ToArray());
+        }
+        catch (Exception) when (stopping)
+        {
+            state.InvalidateAllSessions();
+            await coordinator.AbandonRecoveryAsync(recovery, CancellationToken.None).ConfigureAwait(false);
+            desktopRecoveryInProgress = false;
+            CompleteActiveRecovery(command.Generation, DesktopRecoveryTerminalState.Cancelled,
+                null, ApplyFailureReason.Cancelled, "Shutdown interrupted recovery replacement.");
+            return HostCommandResult.Reject(state.Revision, "host.stopping");
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -979,13 +1028,13 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             throw new InvalidOperationException($"Apply generation {generation} already exists.");
         }
         PruneCompletedApplyOperations(generation);
-        _ = ObserveRecoveryRebuildAsync(
+        TrackBackgroundTask(ObserveRecoveryRebuildAsync(
             assignments,
             state.DisplayTopology,
             generation,
             attempt,
             operation,
-            cancellationToken);
+            cancellationToken));
         return HostCommandResult.Success(state.Revision);
     }
 
@@ -1029,10 +1078,35 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             return HostCommandResult.Success(state.Revision);
         }
 
+        // Rebuild prepares through the ordinary Apply path. Preserve its actual
+        // per-Surface acknowledgements in the recovery journal before committing;
+        // a batch-level Succeeded result is not evidence for each display's frame.
+        foreach (ApplyTimelineEntry entry in FindApplyOperation(command.Generation)?.Snapshot() ?? [])
+        {
+            DesktopRecoveryPhase? phase = entry.Phase switch
+            {
+                ApplyGenerationPhase.SurfaceAttached => DesktopRecoveryPhase.SurfaceAttached,
+                ApplyGenerationPhase.FirstFramePresented => DesktopRecoveryPhase.FirstFramePresented,
+                _ => null,
+            };
+            if (phase is not null)
+                activeRecoveryOperation?.Record(command.Generation, command.Attempt, phase.Value,
+                    entry.DisplayIds, entry.SurfaceOrdinal, entry.Outcome, entry.FailureReason,
+                    "Observed from the rebuild Apply preparation journal.");
+        }
+
         try
         {
             await coordinator.ReplaceSurfacesAsync(command.Prepared, [], cancellationToken)
                 .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (Exception) when (stopping)
+        {
+            FindApplyOperation(command.Generation)?.Fail(ApplyGenerationPhase.SurfacesReplaced,
+                ApplyFailureReason.Cancelled, "Shutdown interrupted rebuild replacement.", ApplyGenerationTerminalState.Cancelled);
+            TrackRetirement(command.Prepared.Sessions, CancellationToken.None);
+            return HostCommandResult.Reject(state.Revision, "host.stopping");
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -1187,10 +1261,10 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             DesktopRecoveryPhase.RebuildScheduled);
         activeRecoveryPreparation?.Dispose();
         activeRecoveryPreparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _ = PostRecoveryRetryAfterDelayAsync(
+        TrackBackgroundTask(PostRecoveryRetryAfterDelayAsync(
             expectedGeneration,
             attempt,
-            activeRecoveryPreparation.Token);
+            activeRecoveryPreparation.Token));
     }
 
     private async Task<HostCommandResult> SetTopologyAsync(
@@ -1222,7 +1296,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             // topology batch using uncertain old-generation Surface/Renderer resources.
             activeDisplayReconciliationOperation?.Complete(
                 DisplayReconciliationTerminalState.Cancelled, state.Generation,
-                ApplyFailureReason.Superseded, "A newer topology joined the Shell recovery transaction.");
+                ApplyFailureReason.Superseded, "A newer topology joined the Shell recovery transaction.",
+                DisplayReconciliationSupersessionCause.NewerTopology);
             state.SetDisplayTopology(command.Topology);
             DisplayReconciliationOperation joined = new(command.Topology.Revision,
                 command.Topology.Displays.Count == 0
@@ -1251,7 +1326,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                 DisplayReconciliationTerminalState.Cancelled,
                 activeDisplayReconciliationGeneration,
                 ApplyFailureReason.Superseded,
-                "Display reconciliation was superseded by a newer topology revision.");
+                "Display reconciliation was superseded by a newer topology revision.",
+                DisplayReconciliationSupersessionCause.NewerTopology);
             if (activeDisplayReconciliationGeneration is long supersededGeneration)
             {
                 CompleteSupersededApply(supersededGeneration);
@@ -1453,13 +1529,13 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                     detail: "Authoritative preparation Shell topology retry started.");
             }
         }
-        _ = ObserveDisplayReconciliationAsync(
+        TrackBackgroundTask(ObserveDisplayReconciliationAsync(
             assignments,
             command.Topology,
             generation,
             plan.RetiredSessionIds,
             operation,
-            cancellationToken);
+            cancellationToken));
         return HostCommandResult.Success(state.Revision, state.Snapshot());
     }
 
@@ -1547,13 +1623,27 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             .ToArray();
         ApplyGenerationOperation? operation = FindApplyOperation(command.Generation);
         operation?.BeginPhase(ApplyGenerationPhase.SurfacesReplaced);
+        using CancellationTokenSource replacementCancellation = operation is null
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+            : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, operation.DeadlineToken);
         try
         {
             await coordinator.ReplaceSurfacesAsync(
                     command.Prepared,
                     replaced,
-                    operation?.DeadlineToken ?? cancellationToken)
+                    replacementCancellation.Token)
                 .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (Exception) when (stopping)
+        {
+            operation?.Fail(ApplyGenerationPhase.SurfacesReplaced, ApplyFailureReason.Cancelled,
+                "Shutdown interrupted topology replacement.", ApplyGenerationTerminalState.Cancelled);
+            TrackRetirement(command.Prepared.Sessions, CancellationToken.None);
+            CompleteDisplayReconciliation(command.Prepared.DisplayTopologyRevision,
+                DisplayReconciliationTerminalState.Cancelled, command.Generation, ApplyFailureReason.Cancelled,
+                "Shutdown interrupted topology replacement.");
+            return HostCommandResult.Reject(state.Revision, "host.stopping");
         }
         catch (Exception exception) when (
             IsTransientShellTopologyMutation(exception) &&
@@ -1602,14 +1692,14 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                     $"Shell coordinate space changed before Replace; retry " +
                     $"{command.ReplacementAttempt + 1} scheduled after {delay}. {exception.Message}");
             }
-            _ = RetryDisplayReconciliationAfterReplaceAsync(
+            TrackBackgroundTask(RetryDisplayReconciliationAfterReplaceAsync(
                 command.Prepared.Assignments,
                 state.DisplayTopology!,
                 command.Generation,
                 command.RetiredSessionIds,
                 operation!,
                 command.ReplacementAttempt,
-                cancellationToken);
+                cancellationToken));
             return HostCommandResult.Success(state.Revision, state.Snapshot());
         }
         catch (Exception exception)
@@ -1741,8 +1831,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             }
             if (desktopRecoveryInProgress && activeRecoveryOperation is not null)
             {
-                _ = ContinueReconnectAfterRecoveryAsync(activeRecoveryOperation.Completion,
-                    activeSessionEnvironmentOperation!.ValidationRevision);
+                TrackBackgroundTask(ContinueReconnectAfterRecoveryAsync(activeRecoveryOperation.Completion,
+                    activeSessionEnvironmentOperation!.ValidationRevision));
                 return HostCommandResult.Success(state.Revision, state.Snapshot());
             }
             return await ContinueSessionReconnectAsync(
@@ -1831,7 +1921,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             }
             else
             {
-                _ = ObserveSessionRecoveryAsync(recovery.Completion, command.SystemRevision);
+                TrackBackgroundTask(ObserveSessionRecoveryAsync(recovery.Completion, command.SystemRevision));
             }
             return accepted;
         }
@@ -1850,7 +1940,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                     // necessary. Releasing the session gate must still restore policy.
                     ApplyPlaybackPolicy(null, cancellationToken);
                 }
-                _ = ObserveSessionReconciliationAsync(operation.Completion, command.SystemRevision);
+                TrackBackgroundTask(ObserveSessionReconciliationAsync(operation.Completion, command.SystemRevision));
             }
             else
             {
@@ -1951,6 +2041,14 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             state.UpdateSession(command.SessionId, command.Generation, playbackState.Value);
         }
 
+        if (command.RendererEvent is RendererFailed failure && !desktopRecoveryInProgress &&
+            state.FindPreparedSession(command.SessionId) is { Renderer: RendererProtocolSession } active &&
+            active.Session.Generation == command.Generation)
+        {
+            RecordBackgroundFailure(new ActiveRendererFailureException(command.SessionId, command.Generation, failure.ErrorCode));
+            TrackRetirement(state.TakeSessions([command.SessionId]), CancellationToken.None);
+        }
+
         return HostCommandResult.Success(state.Revision);
     }
 
@@ -1969,6 +2067,14 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         {
             return HostCommandResult.Success(state.Revision, state.Snapshot());
         }
+
+        shutdown.Cancel();
+        activeRecoveryPreparation?.Cancel();
+        // PrepareRecovery owns the shared old Renderer until its result or failure
+        // arrives. Do not race ordinary retirement against that cleanup owner.
+        bool recoveryOwnsSessions = desktopRecoveryInProgress && state.GetPreparedSessions().Count > 0;
+        if (recoveryOwnsSessions)
+            foreach (PreparedSession session in state.GetPreparedSessions()) shutdownRecoveryRenderers.Add(session.Renderer);
 
         foreach ((long generation, ApplyGenerationOperation operation) in applyOperations)
         {
@@ -2004,12 +2110,15 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         }
         desktopRecoveryInProgress = false;
         PreparedSession[] sessions = state.InvalidateAllSessions().ToArray();
-        TrackRetirement(sessions, CancellationToken.None);
+        if (!recoveryOwnsSessions) TrackRetirement(sessions, CancellationToken.None);
         return HostCommandResult.Success(state.Revision, state.Snapshot());
     }
 
     private void ApplyPlaybackPolicy(SessionId? sessionId, CancellationToken cancellationToken)
     {
+        foreach (PreparedSession prepared in state.GetPreparedSessions())
+            if (prepared.Renderer is RendererProtocolSession protocol && protocol.TryClaimFailureObserver())
+                TrackBackgroundTask(ObserveActiveRendererFailureAsync(prepared.Session.Id, protocol));
         HostStateSnapshot snapshot = state.Snapshot();
         foreach (HostSessionSnapshot session in snapshot.Sessions
                      .Where(item => sessionId is null || item.Session.Id == sessionId.Value))
@@ -2026,8 +2135,19 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             playbackJournal.Record(session.Session.Id.Value, session.Session.Generation,
                 RendererPlaybackEvidenceKind.PolicyDecided, nameof(ChangeRendererState),
                 decision.TargetState, decision.Reason);
-            _ = SendPlaybackDecisionAsync(session.Session.Id, decision, cancellationToken);
+            TrackBackgroundTask(SendPlaybackDecisionAsync(session.Session.Id, decision, cancellationToken));
         }
+    }
+
+    private async Task ObserveActiveRendererFailureAsync(SessionId id, RendererProtocolSession renderer)
+    {
+        try
+        {
+            RendererFailed failure = await renderer.ActiveFailure.WaitAsync(shutdown.Token).ConfigureAwait(false);
+            await PostInternalAsync(new RendererEventCommand(id, failure.Generation, failure), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { /* Session retirement or Host shutdown ends observation. */ }
     }
 
     private async Task ObserveApplyPreparationAsync(
@@ -2383,7 +2503,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                 .ConfigureAwait(false);
             await PostInternalAsync(
                     new DesktopRecoveryRebuildPreparedCommand(generation, attempt, prepared),
-                    cancellationToken)
+                    CancellationToken.None)
                 .ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -2649,6 +2769,31 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         }
     }
 
+    private void TrackBackgroundTask(Task task)
+    {
+        Task observed = ObserveBackgroundTaskAsync(task);
+        lock (backgroundGate)
+        {
+            backgroundTasks.RemoveAll(item => item.IsCompleted);
+            backgroundTasks.Add(observed);
+        }
+    }
+
+    private async Task ObserveBackgroundTaskAsync(Task task)
+    {
+        try { await task.ConfigureAwait(false); }
+        catch (Exception exception) { RecordBackgroundFailure(exception); }
+    }
+
+    private void RecordBackgroundFailure(Exception exception)
+    {
+        lock (backgroundGate)
+        {
+            backgroundFailures.Add(exception);
+            if (backgroundFailures.Count > RetainedApplyDiagnostics) backgroundFailures.RemoveAt(0);
+        }
+    }
+
     private async Task<SessionRetirementBatchResult> ObserveRetirementAsync(
         IReadOnlyList<PreparedSession> sessions,
         CancellationToken cancellationToken)
@@ -2656,6 +2801,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         SessionRetirementBatchResult result = await coordinator
             .RetireAsync(sessions, cancellationToken)
             .ConfigureAwait(false);
+        if (!result.OwnedResourcesCleaned)
+            RecordBackgroundFailure(new InvalidOperationException("Session retirement did not clean all owned resources."));
         lock (retirementGate)
         {
             retirementHistory.Add(result);

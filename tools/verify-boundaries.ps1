@@ -105,7 +105,10 @@ try {
     }
 
     $nativeApiLeaks = Get-ChildItem -Path src -Recurse -Filter *.cs |
-        Where-Object { $_.FullName -notlike '*\LiveWall.Platform.Windows\NativeMethods\*' } |
+        Where-Object {
+            $_.FullName -notlike '*\LiveWall.Platform.Windows\NativeMethods\*' -and
+            $_.FullName -ne (Join-Path $repositoryRoot 'src\LiveWall.Renderer.Video\NativeMethods\VideoNativeMethods.cs')
+        } |
         Select-String -Pattern '\b(DllImport|LibraryImport)\b'
     foreach ($leak in $nativeApiLeaks) {
         $errors.Add("Native API declared outside NativeMethods: $($leak.Path):$($leak.LineNumber)")

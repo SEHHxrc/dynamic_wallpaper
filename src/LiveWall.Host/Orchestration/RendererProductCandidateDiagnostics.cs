@@ -21,7 +21,13 @@ public sealed record RendererProductCandidateRequest(
     bool ExtendedSoak = false,
     ProductCandidateDisplaySelection? DisplaySelection = null,
     DiagnosticRendererEnvironmentTarget? RendererEnvironment = null,
-    TimeSpan? RendererStageTimeout = null);
+    TimeSpan? RendererStageTimeout = null,
+    VideoProductCandidateAssets? VideoAssets = null,
+    Action? AttachmentReady = null,
+    Action<IReadOnlyList<ProductCandidateSessionResult>>? FirstFrameCommitted = null,
+    bool VideoControlRecovery = false,
+    string? VideoControlEvidencePath = null,
+    Action<VideoControlCandidateStage>? ControlStageChanged = null);
 
 public sealed record DiagnosticRendererEnvironmentTarget(
     int TargetIteration,
@@ -191,7 +197,8 @@ public sealed record RendererProductCandidateResult(
     bool OwnedResourcesCleaned,
     ApplyGenerationResult GenerationResult,
     IReadOnlyList<ApplyTimelineEntry> Timeline,
-    SessionRetirementBatchResult RetirementResult);
+    SessionRetirementBatchResult RetirementResult,
+    VideoControlCandidateResult? VideoControl = null);
 
 public sealed class RendererProductCandidateFailureException : Exception
 {
@@ -253,18 +260,29 @@ public static class RendererProductCandidateDiagnostics
                 nameof(request),
                 "Renderer stage timeout must be positive.");
         }
+        if (request.VideoAssets is not null && request.RendererEnvironment is not null)
+            throw new ArgumentException("Video candidates cannot use test Renderer fault environment injection.", nameof(request));
+        if (request.VideoControlRecovery && (request.VideoAssets is null || request.VisibleDuration != TimeSpan.FromSeconds(20)))
+            throw new ArgumentException("Video control acceptance requires Video assets and four 5-second stages.", nameof(request));
 
-        WallpaperDefinition wallpaper = CreateSyntheticWallpaper();
-        InMemoryDiagnosticWallpaperRepository repository = new(
-            new WallpaperLibraryEntry(
-                wallpaper,
-                AppContext.BaseDirectory,
-                new CompatibilityReport(CompatibilityGrade.Native, [])));
-        RendererProcessProvider provider = CreateRendererProvider(
-            request.RendererExecutablePath,
-            request.RendererEnvironment);
+        WallpaperLibraryEntry entry = request.VideoAssets?.Entry ?? new WallpaperLibraryEntry(
+            CreateSyntheticWallpaper(), AppContext.BaseDirectory, new CompatibilityReport(CompatibilityGrade.Native, []));
+        RendererProcessProvider provider = request.VideoAssets is null
+            ? CreateRendererProvider(request.RendererExecutablePath, request.RendererEnvironment)
+            : request.VideoAssets.CreateProvider(request.RendererExecutablePath, request.VideoControlEvidencePath);
         await using WindowsDesktopHost desktopHost =
             WindowsDesktopHost.CreateExperimentalDiagnostics(request.ShellSnapshot);
+        return await RunWithDesktopAsync(request, entry, provider, desktopHost, cancellationToken).ConfigureAwait(false);
+    }
+
+    // Same product command loop/coordinator/provider path; the internal seam permits a
+    // hidden, non-Shell desktop in native preflight. It cannot alter production selectors.
+    internal static async Task<RendererProductCandidateResult> RunWithDesktopAsync(
+        RendererProductCandidateRequest request, WallpaperLibraryEntry entry,
+        IRendererProvider provider, IDesktopHost desktopHost, CancellationToken cancellationToken)
+    {
+        WallpaperDefinition wallpaper = entry.Definition;
+        InMemoryDiagnosticWallpaperRepository repository = new(entry);
         SessionCoordinator coordinator = new(
             repository,
             new DefaultLayoutPlanner(),
@@ -281,12 +299,14 @@ public static class RendererProductCandidateDiagnostics
         int surfaceCount = 0;
         bool ownedResourcesCleaned = false;
         SessionRetirementBatchResult? retirementResult = null;
+        VideoControlCandidateResult? videoControl = null;
         try
         {
             // Surface discovery failures must be observable to diagnostics instead of being
             // reduced to the command loop's asynchronous Apply failure notification.
             await desktopHost.EnsureTopologyAsync(request.DisplayTopology, cancellationToken)
                 .ConfigureAwait(false);
+            request.AttachmentReady?.Invoke();
             await commandLoop.SendAsync(
                     new DisplayTopologyChangedCommand(request.DisplayTopology),
                     cancellationToken)
@@ -382,7 +402,11 @@ public static class RendererProductCandidateDiagnostics
                     item.Surfaces.Count,
                     (item.Renderer as RendererProtocolSession)?.ProcessId))
                 .ToArray();
-            await Task.Delay(request.VisibleDuration, cancellationToken).ConfigureAwait(false);
+            request.FirstFrameCommitted?.Invoke(sessionResults);
+            if (request.VideoControlRecovery)
+                videoControl = await VideoControlCandidateDiagnostics.RunAsync(commandLoop, TimeSpan.FromSeconds(5),
+                    request.ControlStageChanged, cancellationToken).ConfigureAwait(false);
+            else await Task.Delay(request.VisibleDuration, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -404,7 +428,7 @@ public static class RendererProductCandidateDiagnostics
             ownedResourcesCleaned,
             generationResult,
             commandLoop.GetApplyTimelineForDiagnostics(generationResult.Generation),
-            retirementResult ?? new SessionRetirementBatchResult([]));
+            retirementResult ?? new SessionRetirementBatchResult([]), videoControl);
     }
 
     public static IReadOnlyList<DisplayId> ResolveDisplayIds(

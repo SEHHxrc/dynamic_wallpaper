@@ -50,7 +50,43 @@ internal static class Program
         DateTimeOffset startedAt = DateTimeOffset.UtcNow;
         try
         {
+            if (args.Contains(VideoCandidateOptions.Mode, StringComparer.Ordinal))
+            {
+                VideoCandidateOptions videoOptions;
+                try { videoOptions = VideoCandidateOptions.Parse(args); }
+                catch (ArgumentException exception) { Console.Error.WriteLine(exception.Message); return 2; }
+                return await VideoProductCandidateCommand.RunAsync(videoOptions).ConfigureAwait(false);
+            }
+            if (args.Contains(ActiveSessionEndOptions.Mode, StringComparer.Ordinal))
+            {
+                ActiveSessionEndOptions active = ActiveSessionEndOptions.Parse(args);
+                using WindowsDisplayTopologySource source = new();
+                ShellTopologySnapshot shell = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+                if (shell.Availability == ShellTopologyAvailability.ShellUnavailable)
+                    return ShellUnavailableExitCode;
+                await WindowsHostEventChainDiagnostics.RunActiveSessionEndObserverAsync(
+                    FindRendererChildExecutable(), source.Current, active.RunDirectory, CancellationToken.None).ConfigureAwait(false);
+                return 0;
+            }
             options = DiagnosticOptions.Parse(args);
+            if (options.RendererExitProcessCheckEnabled)
+            {
+                using CancellationTokenSource budget = new(TimeSpan.FromSeconds(40));
+                string executable = FindRendererChildExecutable();
+                RendererExitProcessResult[] results =
+                [await WindowsHostEventChainDiagnostics.RunRendererExitProcessCheckAsync(executable, true, budget.Token),
+                    await WindowsHostEventChainDiagnostics.RunRendererExitProcessCheckAsync(executable, false, budget.Token)];
+                string json = JsonSerializer.Serialize(new { schemaVersion = 1, recordedAt = DateTimeOffset.UtcNow,
+                    scope = "RendererProcessWithoutSurface", allPassed = results.All(result => result.Valid), results }, SystemTransitionJsonOptions);
+                Console.WriteLine(json);
+                if (options.ResultJsonPath is not null)
+                {
+                    string path = Path.GetFullPath(options.ResultJsonPath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    await File.WriteAllTextAsync(path, json);
+                }
+                return results.All(result => result.Valid) ? 0 : RendererChildProbeFailedExitCode;
+            }
             using WindowsDisplayTopologySource displaySource = new();
             topology = displaySource.Current;
             PrintTopology(topology);
@@ -66,6 +102,7 @@ internal static class Program
                 options.HostTaskbarNoopEnabled ||
                 options.HostExplorerEventRecoveryEnabled ||
                 options.HostEnvironmentRecoveryEnabled ||
+                options.HostActiveExitCheckEnabled ||
                 options.HostSessionLockEnabled ||
                 options.HostSleepResumeEnabled ||
                 options.HostSessionReconnectEnabled ||
@@ -438,6 +475,34 @@ internal static class Program
             {
                 return await RunHostEnvironmentRecoveryAsync(topology, options.DurationSeconds,
                     options.TargetDisplay, options.ResultJsonPath, cancellation.Token).ConfigureAwait(false);
+            }
+
+            if (options.HostActiveExitCheckEnabled)
+            {
+                ShellTopologySnapshot before = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+                Console.WriteLine($"ACTIVE_HOST_EXIT_CHECK: orange will be visible for {options.DurationSeconds} seconds, " +
+                    "then a close message will be sent ONLY to the owned lifecycle window. No Explorer restart or system logoff.");
+                WindowsHostExitCheckResult exitCheck = await WindowsHostEventChainDiagnostics.RunActiveHostExitCheckAsync(
+                    FindRendererChildExecutable(), topology, ParseProductCandidateDisplaySelection(options.TargetDisplay),
+                    TimeSpan.FromSeconds(options.DurationSeconds), cancellation.Token).ConfigureAwait(false);
+                ShellTopologySnapshot after = WindowsShellTopologyDiagnostics.CaptureSnapshot();
+                int addedWorkers = Math.Max(0, DirectShellWorkers(after).Count - DirectShellWorkers(before).Count);
+                bool ownedWindowsRemain = HasLiveWallOwnedWindows(after);
+                bool shellStable = before.ShellWindowHandle != 0 && before.ShellWindowHandle == after.ShellWindowHandle &&
+                    before.ExecutionContext == after.ExecutionContext;
+                bool valid = exitCheck.Valid && !ownedWindowsRemain && addedWorkers == 0 && shellStable;
+                string json = JsonSerializer.Serialize(new { schemaVersion = 1, recordedAt = DateTimeOffset.UtcNow,
+                    classification = !shellStable ? "EnvironmentChanged" : valid ? "ValidSuccess" : "ProductFailure", scope = "ActiveSurfaceOwnedCloseMessage",
+                    fullBuild = before.BuildIdentity.FullBuild, executionContext = before.ExecutionContext, shellStable,
+                    addedWorkerCount = addedWorkers, ownedWindowsRemain, result = exitCheck }, SystemTransitionJsonOptions);
+                Console.WriteLine(json);
+                if (options.ResultJsonPath is not null)
+                {
+                    string path = Path.GetFullPath(options.ResultJsonPath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    await File.WriteAllTextAsync(path, json, cancellation.Token).ConfigureAwait(false);
+                }
+                return valid ? 0 : ExplorerRecoveryFailedExitCode;
             }
 
             if (options.HostSessionLockEnabled || options.HostSleepResumeEnabled || options.HostSessionReconnectEnabled)
@@ -1015,6 +1080,8 @@ internal static class Program
             $"overlapProven={result?.OverlapProven} | shellGenerationChanged={shellGenerationChanged} | " +
             $"replaceCount={result?.BatchReplaceCount} | finalRevisionValidated={result?.FinalRevisionValidated} | " +
             $"ownedWindowsRemain={ownedWindowsRemain} | addedWorkerCount={addedWorkerCount}.");
+        if (result is not null)
+            Console.WriteLine($"validationIssues={string.Join(',', result.ValidationIssues)}.");
         if (resultJsonPath is not null)
         {
             string absolutePath = Path.GetFullPath(resultJsonPath);
@@ -3182,6 +3249,8 @@ internal static class Program
         bool HostTaskbarNoopEnabled,
         bool HostExplorerEventRecoveryEnabled,
         bool HostEnvironmentRecoveryEnabled,
+        bool RendererExitProcessCheckEnabled,
+        bool HostActiveExitCheckEnabled,
         bool HostSessionLockEnabled,
         bool HostSleepResumeEnabled,
         bool HostSessionReconnectEnabled,
@@ -3220,6 +3289,8 @@ internal static class Program
             bool hostTaskbarNoop = false;
             bool hostExplorerEventRecovery = false;
             bool hostEnvironmentRecovery = false;
+            bool rendererExitProcessCheck = false;
+            bool hostActiveExitCheck = false;
             bool hostSessionLock = false;
             bool hostSleepResume = false;
             bool hostSessionReconnect = false;
@@ -3307,6 +3378,12 @@ internal static class Program
                         break;
                     case "--raised-desktop-host-environment-recovery":
                         hostEnvironmentRecovery = true;
+                        break;
+                    case "--renderer-exit-process-check":
+                        rendererExitProcessCheck = true;
+                        break;
+                    case "--raised-desktop-host-exit-check":
+                        hostActiveExitCheck = true;
                         break;
                     case "--raised-desktop-host-session-lock":
                         hostSessionLock = true;
@@ -3456,7 +3533,7 @@ internal static class Program
                 !productCandidateReplacementFault && !productCandidateRetirementFault &&
                 !productCandidateRecovery && !productCandidateTopology &&
                 !productCandidateTopologyChurn && !hostTaskbarNoop &&
-                !hostExplorerEventRecovery && !hostEnvironmentRecovery && !hostSessionReconnect && !hostSessionLock && !hostSleepResume &&
+                !hostExplorerEventRecovery && !hostEnvironmentRecovery && !hostActiveExitCheck && !hostSessionReconnect && !hostSessionLock && !hostSleepResume &&
                 !transitionGuardProbe && durationSpecified)
             {
                 throw new ArgumentException(
@@ -3502,7 +3579,7 @@ internal static class Program
                 throw new ArgumentException("--pause-before-transition requires a Host system transition diagnostic.");
             }
             if (resultJsonPath is not null && !productCandidate && !productCandidateFault &&
-                !hostSessionLock && !hostSleepResume && !hostSessionReconnect && !hostEnvironmentRecovery)
+                !hostSessionLock && !hostSleepResume && !hostSessionReconnect && !hostEnvironmentRecovery && !rendererExitProcessCheck && !hostActiveExitCheck)
             {
                 throw new ArgumentException(
                     "--result-json requires --raised-desktop-product-candidate or " +
@@ -3511,7 +3588,7 @@ internal static class Program
             if (targetDisplaySpecified && !productCandidate && !productCandidateLoop &&
                 !productCandidateFault && !productCandidateReplacementFault &&
                 !productCandidateRetirementFault && !productCandidateRecovery &&
-                !hostTaskbarNoop && !hostExplorerEventRecovery && !hostEnvironmentRecovery && !hostSessionLock &&
+                !hostTaskbarNoop && !hostExplorerEventRecovery && !hostEnvironmentRecovery && !hostActiveExitCheck && !hostSessionLock &&
                 !hostSleepResume && !hostSessionReconnect && !transitionGuardProbe)
             {
                 throw new ArgumentException(
@@ -3602,6 +3679,8 @@ internal static class Program
                 Convert.ToInt32(hostTaskbarNoop) +
                 Convert.ToInt32(hostExplorerEventRecovery) +
                 Convert.ToInt32(hostEnvironmentRecovery) +
+                Convert.ToInt32(rendererExitProcessCheck) +
+                Convert.ToInt32(hostActiveExitCheck) +
                 Convert.ToInt32(hostSessionLock) +
                 Convert.ToInt32(hostSleepResume) +
                 Convert.ToInt32(hostSessionReconnect) +
@@ -3630,6 +3709,8 @@ internal static class Program
                 hostTaskbarNoop,
                 hostExplorerEventRecovery,
                 hostEnvironmentRecovery,
+                rendererExitProcessCheck,
+                hostActiveExitCheck,
                 hostSessionLock,
                 hostSleepResume,
                 hostSessionReconnect,

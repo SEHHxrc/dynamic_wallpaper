@@ -47,6 +47,22 @@ public sealed class AtomicFileWriterTests : IDisposable
         (await File.ReadAllTextAsync(destination)).Should().Be("{\"stateRevision\":7,\"status\":\"ready\"}");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CancelledWriteDoesNotCommitReceiptOrLeaveTemporaryFiles(bool existing)
+    {
+        string destination = Path.Combine(rootPath, "native-exit-receipt.json");
+        if (existing) await File.WriteAllTextAsync(destination, "old");
+        using CancellationTokenSource expired = new();
+        expired.Cancel();
+        Func<Task> write = () => AtomicFileWriter.WriteAllTextAsync(destination, "new", expired.Token);
+        await write.Should().ThrowAsync<OperationCanceledException>();
+        if (existing) (await File.ReadAllTextAsync(destination)).Should().Be("old");
+        else File.Exists(destination).Should().BeFalse();
+        Directory.EnumerateFiles(rootPath, "*.tmp").Should().BeEmpty();
+    }
+
     public void Dispose()
     {
         Directory.Delete(rootPath, recursive: true);

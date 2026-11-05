@@ -10,4 +10,6 @@
 
 该工具仍是测试 Renderer，并非 Video/Web Renderer。它现已覆盖一次性令牌 `Hello`、`Initialize → Initialized`、`AttachSurface → SurfaceAttached`、`LoadWallpaper → ContentLoaded → FirstFramePresented`、严格递增 generation 的再次附着和 `Shutdown → ShutdownCompleted`。
 
+进程启动后、连接 Pipe/发送 Hello 前，会设置并读回当前进程的 Windows shutdown level `0x280`；Host 使用 `0x281`，以声明先让 Host 发起清理、再结束 Renderer 的相对顺序。设置失败不进入握手，正常退出恢复原参数。该设置不改变全局策略，也不能保证强制终止时一定收到 ShutdownCompleted；真实注销仍必须独立核验协议回执与资源清理。
+
 测试 Renderer 会拒绝 Attach 前的 Load、重复/倒退 generation、重复 messageId 和未知命令。Host 正式会话另行验证握手/阶段超时、错误令牌、未知事件与重复事件。现在支持加载后的 Play/Resume、Pause、Suspend，并发送真实协议 `PlaybackStateChanged` 回执。静态合成色块没有自主渲染循环，暂停与播放在视觉上相同；回执只证明此测试 Renderer 接受播放控制，不能替代 Video/Web 动态内容的帧计数验收或显示矩阵。

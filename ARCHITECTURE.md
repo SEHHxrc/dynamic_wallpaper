@@ -58,7 +58,7 @@
 | 后台核心 | C# WinExe + Win32 P/Invoke | 无主窗口，仅托盘和消息窗口常驻 |
 | 桌面嵌入 | Win32 HWND + WorkerW/Progman 适配层 | 未公开 Shell 细节限定在一个项目内；按 build 验证，未知环境失败关闭 |
 | GPU 合成 | DirectComposition | Web 使用 Composition Controller；视频以子 HWND 接入 |
-| 视频播放 | libmpv，D3D11，`gpu-next`，`hwdec=auto-safe` | 独立进程；发行前审计 mpv/FFmpeg 许可证构建 |
+| 视频播放 | libmpv Render API（`vo=libmpv`）+ D3D11 + Renderer-owned DirectComposition/交换链 | ADR-011；独立进程拥有纹理与提交证据，硬解实际能力单独验证；发行前审计 mpv/FFmpeg 许可证构建 |
 | Web 播放 | Microsoft Edge WebView2 Evergreen | 共享 Environment/UDF；按需创建，暂停时 TrySuspend |
 | 音频分析 | WASAPI Loopback + Hann Window + Real FFT | 仅壁纸声明需要时启用，默认不捕获 |
 | 进程间通信 | Windows Named Pipe + 长度前缀 UTF-8 JSON | 不引入 gRPC；命令和事件有协议版本 |
@@ -522,6 +522,8 @@ Shell 结构发现
 `StructurallyValidated` 不能当作生产 attach point。一个可呈现附着能力至少绑定 AdapterId、完整 build/UBR、结构指纹、Shell generation、PresentationKind 和验收范围；单个 HWND 不足以表达 Raised Desktop。Platform.Windows 内部可以持有包含 parent、DefView Z-order anchor 和 Shell backdrop WorkerW 的短生命周期 `DesktopAttachmentLease`，但这些 Shell HWND 不得持久化、跨进程或暴露给 UI/Domain，Explorer 重建后必须重新发现。
 
 Shell attachment 的呈现路径与 Host ↔ Renderer 的跨进程 binding 是两个独立维度。Renderer 可以在自己的子 HWND 内部使用 GDI、libmpv、WebView2、DirectComposition 或交换链；只要跨进程仍只传 Host 容器 HWND，窗口父子关系和 `SurfaceAttached`/`FirstFramePresented` 语义不变，就仍属于协议 v1 `HwndChild`，不因内部使用 DirectComposition 而升级协议。只有跨进程对象不再是容器 HWND，或 Host 必须接收/合成 Renderer 的共享纹理、交换链句柄、同步 fence 等 GPU 资源时，才需要新的 `RendererSurfaceBinding` 与协议 minor 版本。
+
+Video 内部按 ADR-011 使用 `vo=libmpv + D3D11 Render API`，由独立 Renderer 拥有 child、纹理、DComp target/visual 和交换链。首帧确认当前 binding/generation 的有效 Render/Present/Commit 与必要的 Commit 完成，不承诺物理屏幕已经扫描显示；隐藏 provisional 必须能够先准备后激活。提交序列不等于解码序列，暂停时可以把当前有效视频帧重新渲染到新目标，不能借用旧目标结果或等待媒体时间推进。Render API/immediate context 在专属线程串行执行，控制线程使用普通 client API；先停止任务并释放 Render Context，再销毁 core 和卸载库。正常播放不逐帧读回像素或强制等待 DComp，硬解、额外 GPU 拷贝和持续开销独立测量。C0 wid/gpu-next 仅保留为历史诊断，不作为正式静默回退。
 
 Platform.Windows 必须通过唯一专用 Window Dispatcher 线程创建、定位、显隐、换父级和销毁所有自有 HWND。该线程设为 STA 并运行 Win32 消息循环；`DestroyWindow` 必须在创建窗口的线程执行。逻辑状态提交是原子的；同一父 HWND 的视觉交换使用 DeferWindowPos 系列尽量在一个屏幕刷新周期完成，不承诺跨父窗口的操作系统事务原子性。
 

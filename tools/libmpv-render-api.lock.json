@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "scope": "DevelopmentOnlyNotForDistribution",
+  "mpvCommit": "e471496c56",
+  "libraryLock": "libmpv-development.lock.json",
+  "renderHeaderSource": "https://raw.githubusercontent.com/mpv-player/mpv/e471496c56/include/mpv/render.h",
+  "renderHeaderSha256": "F2550AA29B2E9B20988BD954B4383E9FA05FD9E40D1669FBC6EDF2AFAC603F15",
+  "d3d11HeaderSource": "https://raw.githubusercontent.com/mpv-player/mpv/e471496c56/include/mpv/render_d3d11.h",
+  "d3d11HeaderSha256": "7B880453EE3C780B0D0F1C3F8ECAA1D23B289522F4C687E6857C8475F4A3F6FB",
+  "api": "vo=libmpv; d3d11; renderer-owned texture and submission",
+  "distributionReview": "Pending; no production packaging decision"
+}

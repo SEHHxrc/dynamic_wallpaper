@@ -6,6 +6,14 @@ using LiveWall.Infrastructure.Ipc;
 
 namespace LiveWall.Host.Orchestration;
 
+internal sealed class ActiveRendererFailureException(SessionId id, long generation, string errorCode)
+    : Exception($"Active Renderer failed: {errorCode}.")
+{
+    public SessionId SessionId { get; } = id;
+    public long Generation { get; } = generation;
+    public string ErrorCode { get; } = errorCode;
+}
+
 internal sealed class RendererProtocolSession : IRendererSession
 {
     private readonly LengthPrefixedJsonChannel protocolChannel;
@@ -13,12 +21,18 @@ internal sealed class RendererProtocolSession : IRendererSession
     private readonly RendererProtocolStateMachine stateMachine;
     private readonly Channel<RendererEvent> events;
     private readonly HashSet<string> receivedMessageIds = new(StringComparer.Ordinal);
+    private readonly Queue<ChangeRendererState> playbackReplies = new();
     private readonly Lock stateGate = new();
     private readonly CancellationTokenSource lifetime = new();
     private readonly Task receiveTask;
     private readonly Task processTask;
+    private readonly TimeSpan processExitTimeout;
+    private readonly TaskCompletionSource<RendererFailed> activeFailure = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int failureObserverClaimed;
+    private Task? disposeTask;
     private int readerClaimed;
     private bool disposed;
+    private bool shutdownAcknowledged;
     private bool terminalPublished;
     private readonly RendererPlaybackJournal playbackJournal = new();
 
@@ -30,11 +44,15 @@ internal sealed class RendererProtocolSession : IRendererSession
         long generation,
         LengthPrefixedJsonChannel protocolChannel,
         IRendererProcessHandle process,
-        IEnumerable<string>? receivedHandshakeMessageIds = null)
+        IEnumerable<string>? receivedHandshakeMessageIds = null,
+        TimeSpan? processExitTimeout = null)
     {
         Id = id;
         this.protocolChannel = protocolChannel ?? throw new ArgumentNullException(nameof(protocolChannel));
         this.process = process ?? throw new ArgumentNullException(nameof(process));
+        this.processExitTimeout = processExitTimeout ?? TimeSpan.FromSeconds(1);
+        if (this.processExitTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(processExitTimeout));
         stateMachine = new RendererProtocolStateMachine(generation);
         if (receivedHandshakeMessageIds is not null)
         {
@@ -53,6 +71,9 @@ internal sealed class RendererProtocolSession : IRendererSession
     public SessionId Id { get; }
 
     internal int ProcessId => process.Id;
+    internal Task<RendererFailed> ActiveFailure => activeFailure.Task;
+    internal bool TryClaimFailureObserver() => Interlocked.Exchange(ref failureObserverClaimed, 1) == 0;
+    internal ValueTask DisconnectForDiagnosticsAsync() => protocolChannel.DisposeAsync();
 
     public IAsyncEnumerable<RendererEvent> ReadEventsAsync(CancellationToken cancellationToken)
     {
@@ -73,6 +94,11 @@ internal sealed class RendererProtocolSession : IRendererSession
         {
             ObjectDisposedException.ThrowIf(disposed, this);
             stateMachine.ValidateAndApply(command);
+            if (command is ChangeRendererState { TargetState: not LiveWall.Domain.Playback.PlaybackState.Stopped } requestedPlayback)
+            {
+                if (playbackReplies.Count >= 256) throw new InvalidOperationException("Too many pending playback acknowledgments.");
+                playbackReplies.Enqueue(requestedPlayback);
+            }
             envelope = RendererProtocolMapper.ToEnvelope(Id.Value, command);
         }
 
@@ -100,31 +126,82 @@ internal sealed class RendererProtocolSession : IRendererSession
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         lock (stateGate)
         {
-            if (disposed)
+            if (disposeTask is null)
             {
-                return;
+                disposed = true;
+                stateMachine.Close();
+                disposeTask = DisposeCoreAsync(shutdownAcknowledged);
             }
 
-            disposed = true;
-            stateMachine.Close();
+            return new ValueTask(disposeTask);
         }
+    }
 
+    private async Task DisposeCoreAsync(bool acknowledged)
+    {
         lifetime.Cancel();
-        await protocolChannel.DisposeAsync().ConfigureAwait(false);
-        if (!process.HasExited)
+        activeFailure.TrySetCanceled();
+        try
         {
-            process.Terminate();
+            bool terminated = false;
+            try
+            {
+                // ShutdownCompleted confirms resource teardown, but Main may still be
+                // unwinding. Keep the pipe open while allowing a bounded normal return.
+                // An abandoned/unacknowledged session receives no such grace period.
+                if (acknowledged && !process.HasExited)
+                    await WaitForProcessExitAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Terminate();
+                    terminated = true;
+                }
+            }
+            if (terminated && !await WaitForProcessExitAsync().ConfigureAwait(false))
+                throw new TimeoutException("Renderer did not exit after termination.");
         }
+        finally
+        {
+            try
+            {
+                await IgnoreCancellationAsync(receiveTask).ConfigureAwait(false);
+                await IgnoreCancellationAsync(processTask).ConfigureAwait(false);
+            }
+            finally
+            {
+                try { await protocolChannel.DisposeAsync().ConfigureAwait(false); }
+                finally
+                {
+                    try { await process.DisposeAsync().ConfigureAwait(false); }
+                    finally
+                    {
+                        lifetime.Dispose();
+                        events.Writer.TryComplete();
+                    }
+                }
+            }
+        }
+    }
 
-        await IgnoreCancellationAsync(receiveTask).ConfigureAwait(false);
-        await IgnoreCancellationAsync(processTask).ConfigureAwait(false);
-        await process.DisposeAsync().ConfigureAwait(false);
-        lifetime.Dispose();
-        events.Writer.TryComplete();
+    private async Task<bool> WaitForProcessExitAsync()
+    {
+        using CancellationTokenSource budget = new(processExitTimeout);
+        try
+        {
+            await process.WaitForExitAsync(budget.Token).WaitAsync(budget.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested || process.HasExited)
+        {
+        }
+        return process.HasExited;
     }
 
     private async IAsyncEnumerable<RendererEvent> ReadAndReleaseAsync(
@@ -135,6 +212,13 @@ internal sealed class RendererProtocolSession : IRendererSession
             await foreach (RendererEvent rendererEvent in events.Reader.ReadAllAsync(cancellationToken)
                                .ConfigureAwait(false))
             {
+                // A queued control reply may predate a subsequent reattachment. It
+                // cannot satisfy a new binding's stage or revive its playback state.
+                if (rendererEvent is RendererPlaybackStateChanged)
+                {
+                    lock (stateGate)
+                        if (rendererEvent.Generation < stateMachine.Generation) continue;
+                }
                 yield return rendererEvent;
             }
         }
@@ -162,7 +246,15 @@ internal sealed class RendererProtocolSession : IRendererSession
 
                 lock (stateGate)
                 {
-                    stateMachine.ValidateAndApply(rendererEvent);
+                    if (rendererEvent is RendererPlaybackStateChanged feedback)
+                    {
+                        if (!playbackReplies.TryDequeue(out ChangeRendererState? expected) ||
+                            expected.Generation != feedback.Generation || expected.TargetState != feedback.State || stateMachine.IsClosed)
+                            throw new InvalidOperationException("Renderer playback acknowledgment does not match a sent command.");
+                    }
+                    else stateMachine.ValidateAndApply(rendererEvent);
+                    if (rendererEvent is RendererShutdownCompleted)
+                        shutdownAcknowledged = true;
                     if (rendererEvent is RendererPlaybackStateChanged playback)
                     {
                         playbackJournal.Record(Id.Value, playback.Generation,
@@ -172,6 +264,7 @@ internal sealed class RendererProtocolSession : IRendererSession
 
                 await events.Writer.WriteAsync(rendererEvent, cancellationToken)
                     .ConfigureAwait(false);
+                if (rendererEvent is RendererFailed failure) activeFailure.TrySetResult(failure);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -283,11 +376,13 @@ internal sealed class RendererProtocolSession : IRendererSession
             generation = stateMachine.Generation;
         }
 
-        events.Writer.TryWrite(new RendererFailed(
+        RendererFailed failure = new(
             generation,
             "renderer.protocol.invalid_state",
             exception.Message,
-            Recoverable: false));
+            Recoverable: false);
+        activeFailure.TrySetResult(failure);
+        events.Writer.TryWrite(failure);
         events.Writer.TryComplete(exception);
     }
 
@@ -310,12 +405,14 @@ internal sealed class RendererProtocolSession : IRendererSession
             generation = stateMachine.Generation;
         }
 
-        events.Writer.TryWrite(new RendererFailed(
+        RendererFailed failure = new(
             generation,
             "renderer.process.exited",
-            $"Renderer process {process.Id} exited with code " +
+            "Renderer process exited with code " +
             $"{process.ExitCode?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}.",
-            Recoverable: true));
+            Recoverable: true);
+        activeFailure.TrySetResult(failure);
+        events.Writer.TryWrite(failure);
         events.Writer.TryComplete();
     }
 

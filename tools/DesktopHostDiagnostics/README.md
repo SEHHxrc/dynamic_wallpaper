@@ -2,6 +2,46 @@
 
 采集 Shell/显示器拓扑，并以受控色块模式验证候选桌面附着。不得自动修改持久设置或生产 allowlist；输出必须脱敏稳定设备路径中的用户数据。
 
+## C1.2 正式 Video 产品候选（2026-10-29）
+
+构建 Release 后，从交互式桌面执行只读预检：
+
+```powershell
+./tools/run-video-product-candidate.ps1 -PreflightOnly
+```
+
+此命令检查固定视频/原生库、当前会话/WinSta0/Default 和显示器，输出新 JSON；不发送 Raised 请求、不创建 Surface/Renderer。ready 不是 attach 或像素通过，结构适配器验证明确延后。项目级 .NET 运行时只在本次调用期间使用，原先未设置/空值/已有值均恢复，不修改全局 PATH。
+
+可见实验必须先获得用户同意，再显式执行：
+
+```powershell
+./tools/run-video-product-candidate.ps1 -ConfirmDesktopPresentation -DurationSeconds 10
+```
+
+调用 `--video-product-candidate`，复用真实 HostCommandLoop、SessionCoordinator、Raised lease/Native Factory 和正式 RendererProcessProvider/RendererProtocolSession/Video Program。仅当前主屏，默认 10 秒、范围 1–30 秒；计时从首帧后 Replace 成功开始。首轮连续播放原始移动青色条及黄/橙/偏绿方向标记，不主动暂停、调整显示或重启 Explorer。观察四边覆盖、运动/循环、图标/任务栏/普通窗口层级和结束后恢复。无需插拔、改缩放、锁屏或睡眠；Ctrl+C 请求取消并走独立 retirement。
+
+底层必填参数为 `--renderer-executable <absolute-local-exe> --content-root <absolute-native-fixture> --libmpv <absolute-dll> --result-json <fresh-json>`，可加 `--duration-seconds 10`；可见时还必须带 `--confirm-desktop-presentation`，缺少返回 2且不探测 Shell。只读使用 `--preflight-only`，不需要呈现批准。当前不接受 all/其他显示器或其他诊断模式的混合参数，避免悄然扩大首轮范围。wrapper 自动解析项目路径、固定开发依赖和现有 C0 原生 fixture，直接启动已构建 exe，不每次运行 MSBuild。
+
+结果保存运行前/请求后/退出后的脱敏结构、逐阶段 Apply/首帧/Replace 与 retirement、实际 Renderer exit code、两类清理结论；拒绝覆盖已有结果。临时 Shell HWND/PID只作本次身份比较，进程在提交时保留真实 handle 后才读取退出码，不重新用旧 PID 打开进程。manualPresentation 固定为运行当时 NotYetConfirmed，反馈只补台账。自有资源清理成功不代表 Shell mutation 恢复：新增 WorkerW 残留为 CleanupIncomplete/退出码 6，身份/采样不确定也不算完整恢复；不发送未经验证的逆消息、不销毁 Shell-owned 窗口、不静默重启 Explorer。默认生产组合根、两个空 allowlist 和 Renderer v1 DTO/Schema 不变。
+
+2026-11-02 首轮获准的主屏 10 秒实验已完成首帧和一次 Replace，但实际 Renderer ExitCode=-1，结果为 CandidateFailed/退出码 8。自有窗口为零、进程已结束、关闭回执收到；Shell WorkerW 从 0 增为 1，仍为 CleanupIncomplete。2026-11-03 用户确认“确实完整覆盖”，覆盖人工项单独记为 Passed；其他视觉项未据此扩写通过。原始 JSON 与运行时人工状态保持不改写，详情见统一台账。已修复 Host 在回执后立即终止进程的竞态，后续可见复测须再次确认，不自动重播。
+
+新结果用 `ownedResourcesCleanup` 表示真实自有资源移除，另以 `gracefulRetirement` 校验关闭回执和全部实际退出码 0。异常退出即使资源清理完整仍返回 8；若正常退休通过但 Shell mutation 未恢复则返回 6。当前 PowerShell 脚本执行策略若拒绝 wrapper，应保持系统策略不变，可在获得同样实验授权后直接运行已构建的 exe 及上列完整参数；不要将脚本未启动算作桌面测试。
+
+2026-11-03 经用户单独批准，仅执行一次修复后的主屏 10 秒复测，结果 `c12-desktop-retest-20261103-52167a945faf489d8f2bfe9544589ef9.json`：generation=1 Succeeded、唯一一次首帧后 Replace、ShutdownCompleted=True、实际 Renderer ExitCode=0、gracefulRetirement=True、自有清理 Complete、无自有窗口或实验进程残留。用户确认覆盖、连续运动、图标/任务栏/普通窗口层级及结束恢复“全部正常”，单屏呈现与正常退休代表项通过。Shell WorkerW 从 0 增为 1 且遗留，整轮保持 CandidateRunCompletedWithShellRecoveryIssue/退出码 6，不开放生产；原始 manualPresentation 和旧失败不改写。详细哈希与时间线见统一台账。
+
+## C1.3 单屏控制与重附着代表验收
+
+```powershell
+./tools/run-video-product-candidate.ps1 -ControlRecovery -ConfirmDesktopPresentation
+```
+
+底层仍使用 `--video-product-candidate`，额外显式 `--control-recovery`；需要同样的 renderer/content/libmpv/result 绝对路径。固定 Playing→Paused→ReattachedPaused→Resumed 各 5 秒，总观察 20 秒；若指定 duration，必须为 20，不改变其他色块/连续视频的 30 秒上限。只读加 `-PreflightOnly` 或 `--preflight-only`，不创建 Surface/Renderer，也不因预检而授权呈现。
+
+共用正式 Host 阶段驱动，等待实际播放反馈和新 binding 首帧后再开始观察计时，记录单调耗时、同 Renderer/新 Host/child、原生媒体时间冻结/恢复和正常退休。重附着通过诊断合成 Host 恢复命令，不重启 Explorer；不修改显示、用户配置或生产 allowlist。原生 JSONL 只保存本轮状态，结果文件均拒绝覆盖。已有 WorkerW 不计为新 mutation；NotRequired 不能追改此前 CleanupIncomplete。
+
+2026-11-03 仅执行一次获准 20 秒代表实验，`c13-control-desktop-20261103-54b77824c4024de5910cbc9785a6d098.json`：四阶段完成，原生暂停增量 0、41 个暂停样本与 20 个恢复样本，同 Renderer/全新 Host/child、ShutdownCompleted、实际 ExitCode=0 和完整清理通过。WorkerW 1→1、added=0，整轮退出码 0。用户确认全部符合预期，单屏控制代表项关闭；C1 按有限范围收口，C2/双屏/真实 Video Explorer/长期资源与 Platform 生产门禁独立保留。原始 manualPresentation 不随人工反馈重写。
+
 ## 当前能力
 
 默认命令只读输出真实会话中的稳定显示器 ID、虚拟桌面坐标、缩放和刷新率：
@@ -245,6 +285,59 @@ DesktopHostDiagnostics.exe --raised-desktop-host-environment-recovery --confirm-
 
 必须先得到用户对色块和 Explorer 重启的明确同意。默认目标仍为 primary；双屏测试显式选择 all。用户预先打开显示设置，等 `ENVIRONMENT_RECOVERY_ARMED` 后在 180 秒内只修改一次目标屏缩放，并保留更改，不拔插、旋转、锁屏、睡眠或重复操作。工具只在正式 Host 拓扑准备仍在途时重启 Explorer 一次；`ENVIRONMENT_RECOVERY_RESTARTING` 后允许短暂黑屏和图标/任务栏恢复，随后等待橙色完整覆盖并在指定观察时间后正常退出。不会自动还原显示设置；用户如需还原，须等诊断退出后手动处理。
 
-结果通过必须有 confirmed Shell generation 抢占旧 reconciliation 的证据、一个成功 recovery、一次批量 Replace、最新 revision 的精确 Surface bounds、Renderer 实际退出及资源清理。没有重叠为 `EnvironmentInconclusive`（独立退出码 9），不是通过或自动重试理由；溢出为 HarnessFailure，异常记录 phase/type 和 DiagnosticIncomplete（外部取消为 Cancelled），不得假定清理成功。逐 revision/recovery 时间线和清理证据保存 JSON，不包含认证令牌、Pipe 名或 Shell HWND/PID。Shell WorkerW 前后计数仅说明是否新增，不证明未公开请求的可撤销性。当前 Debug/Release `302/302`；实机尚未执行，Stage B 仍未接受。
+结果通过必须有强类型 `ShellGenerationChanged` 抢占旧 reconciliation 的证据、一个成功 recovery、一次批量 Replace、最新 revision 的精确 Surface bounds、Renderer 实际退出及资源清理。不再通过匹配 Detail 文本判定并发。共享校验器输出 `validationIssues`，严格检查逐 revision 终态、逐显示器/Session/ordinal 一一对应、逐屏当前 generation 首帧先于 Replace、匹配的优雅退休与实际进程退出；缺失、重复、stale 或空集合不能视为通过。没有重叠为 `EnvironmentInconclusive`（独立退出码 9），不是通过或自动重试理由；溢出为 HarnessFailure，异常记录 phase/type 和 DiagnosticIncomplete（外部取消为 Cancelled），不得假定清理成功。逐 revision/recovery 时间线和清理证据保存 JSON，不包含认证令牌、Pipe 名或 Shell HWND/PID。Shell WorkerW 前后计数仅说明是否新增，不证明未公开请求的可撤销性。2026-10-23 Debug/Release `334/334`；当前无外接屏，实机尚未执行，Stage B 仍未接受。
+
+### P1.9.5 无可见 Surface 的退出检查
+
+```powershell
+./tools/run-host-exit-validation.ps1 -Configuration Release
+DesktopHostDiagnostics.exe --renderer-exit-process-check --result-json artifacts/diagnostics/renderer-exit-process-check.json
+```
+
+第一个脚本启动五个独立正式 Host，使用专属 scope 和 artifacts 配置目录，只向其自有生命周期 HWND 发送 Close、查询后取消、确认结束标志消息。不广播、不调用 OS 注销/关机 API、不运行壁纸，不更改用户配置。检查退出码、自有窗口、离线 Assignment 及 `host-exit-receipt.json`；失败停止整批，不补跑掩盖。若子进程未退出，只强制结束本次由脚本创建的进程并标记 forcedCleanup=True/失败，保留结果与日志。ControlledProcessGatePassed 不是实际 OS 会话结束通过。
+
+第二个入口在 Shell/显示拓扑采样前运行，启动真实 RendererChildProbe、通过正式 Provider 握手，只执行 Shutdown 或 ForcedDispose，绝不 Attach/Load。记录真实进程退出和句柄释放；强制退出不伪装成 ShutdownCompleted。两者均无需观察屏幕或外接显示器。
+
+### P1.9.5 活动 Surface 退出观察（须先获用户同意）
+
+```powershell
+DesktopHostDiagnostics.exe --raised-desktop-host-exit-check --target-display primary --duration-seconds 5 --result-json artifacts/diagnostics/active-host-exit.json
+```
+
+复用正式 Runtime、事件桥、Renderer Session 和 Raised 诊断 Factory。全部首帧提交后保持橙色指定时间，再只向自有生命周期窗口发 Close，不改显示设置、不重启 Explorer、不注销系统。检查 native Close 被接收、共享 Stop、graceful retirement、Renderer 真正退出、自有资源、Shell/执行上下文稳定和 WorkerW 增量。预期橙色约五秒后恢复原壁纸，图标/任务栏/窗口始终在上；没有黄色阶段。2026-10-23 首次样本人工视觉正常，但诊断通知先于停止登记导致退出原因竞态，原始失败保留；修复后经用户授权在 `26200.9711` 单屏复测得到 `ValidSuccess`、退出码 0，WindowClose/回执匹配、正常退休和全部自有资源清理通过。用户确认本轮也全程正常，单屏活动 Surface Close 自动及人工验收关闭，不等于真实 Windows 会话结束通过。证据为 `artifacts/diagnostics/active-host-exit-retest-20261023-223803.json`。
+
+真实注销/关机另需用户保存工作和确认。Program 的 Runtime 回执在清理后、退出任务完成前原子写入，另有 native cleanup observation 回执；native 整体最多等四秒（含预留写入预算），Windows 强制终止可能早于普通退休预算。回执缺失须判未完成，不以受控消息代替 OS 样本。最新 Debug/Release 428/428，合成证据 25/25，双回执正式 Host 五项消息及 Renderer 无 Surface 两项进程检查通过；Stage B 和 allowlist 不变。
 
 验收矩阵和下一步子窗口/Z-order 诊断方向见 `docs/windows-desktop-host.md`；实时状态见 `docs/implementation-status.md`。
+
+### P1.9.5 真实手动注销观察
+
+`./tools/run-host-session-end.ps1 -Mode Arm` 启动隐藏的正式 Release Host，在项目 artifacts 独立配置目录预置离线 Assignment，不创建壁纸 Surface/Renderer，不注入退出消息、不设置开机启动、不调用注销/关机。仅当本进程与 Shell 处于同一交互式 `WinSta0\Default`、Host 自有窗口报告 Running、没有预先存在的回执时才输出 `SESSION_END_OBSERVER_ARMED` 和唯一 RunDirectory；Arm 返回后 Host 继续等待真实系统通知。准备失败只尝试关闭本次自有 Host，并保留失败记录。
+
+获用户同意并输出就绪后，由用户先保存工作，手动注销并重新登录；不是锁屏、睡眠或重启 Explorer。之后执行 `./tools/run-host-session-end.ps1 -Mode Verify -RunDirectory <Arm输出的完整目录>`，检查本轮时间范围内的 SessionLogoff、Runtime/Cleanup、完整离线 Assignment、播放策略文件与空 stderr。旧 manifest 仍要求正式 stdout 退出尾行，写入本轮 `verification.json`；新的 Arm 标注 `nativeExitEvidenceVersion=1` 和 Host executable SHA256，采用前瞻 v2 契约并写入 `verification-v2.json`。v2 要求 Runtime 和 native 两份原子回执 runId 一致、原因匹配、native 阶段为 `NativeCallbackCleanupObserved`、cleanup outcome Completed、预算与状态合法；缺少任何一份均不通过，未知版本拒绝降级。`SessionLogoffCallbackEvidenceValidated` 只表示相关联的回调清理证据，不声称 callback 已返回、Main 已完成或实际进程退出码已被观察，stdout 退出尾行仅单独反映该附加证据。不能覆盖其他轮次，也不能把旧样本追改为 v2 通过；真实手动注销还须用户确认。此样本不验证“携带活动 Renderer 的 OS 强制结束”，也不代替已独立完成的活动 Surface Close 样本。
+
+2026-10-23 首个真实手动注销样本 `run-cda178f4bff24080ac1ebd19154be50f` 已核验：SessionLogoff 回执、RuntimeStopped/CleanupSucceeded、Assignment 与播放策略保存通过，stderr 为空；stdout 缺少最终 HOST_STOPPED，保持 `IncompleteOrFailed`，不回写为成功。用户通过开始菜单用户菜单注销，操作有效。需先补足 native 回调结束的有界持久观测设计，不能仅靠放宽 stdout 条件把该样本改为通过；未经再次确认不发起注销补测。
+
+其后双层 native 持久观测已实现并通过 Debug/Release 自动及正式 Host 受控进程检查。`./tools/test-host-session-end-evidence.ps1` 是独立的 13 项合成 JSON 门禁，不启动 Host 或访问桌面；覆盖新契约双回执成功、旧样本保持失败，以及缺失/错配/超时/非法状态/未知版本拒绝。只有未来显式授权的新 Arm 才会等待真实系统样本，本轮没有自动再次注销。
+
+随后经用户再次授权准备的真实样本 `run-1a8d73f998984bb5baf8eeed0d7332e8` 已完成注销/重新登录，并通过 `verification-v2.json: SessionLogoffCallbackEvidenceValidated`（核验脚本退出码 0）。Runtime/native 回执 runId、SessionLogoff 原因及状态匹配，native 记录 elapsed=81.416 ms / budget=4000 ms；Assignment、播放策略与空 stderr 均通过。stdout 尾行依旧缺失，实际 Host 退出码和 callback 返回保持未观察，不能与核验脚本退出码混淆。该无 Surface/Renderer 的真实注销清理代表场景关闭，不扩展为活动 Renderer 的 OS 退出矩阵。登录后第三方壁纸自启动且已由用户关停；本轮只验证注销前落盘的清理证据，不构成竞争壁纸恢复测试。首次旧样本仍保留不完整，不重复注销来追改它。
+
+### P1.9.5 最后实机项：活动 Renderer 单屏注销
+
+必须先取得显示色块和人工注销实验的明确同意；不要将下面命令当作只读检查。默认 Arm 行为不变，只有显式开关才启动可见 Renderer：
+
+```powershell
+./tools/run-host-session-end.ps1 -Mode Arm -WithActiveRenderer
+# 重新登录后，不带 WithActiveRenderer，只核验本轮独立目录：
+./tools/run-host-session-end.ps1 -Mode Verify -RunDirectory <本轮完整目录>
+```
+
+该模式启动独立的 `DesktopHostDiagnostics --raised-desktop-host-session-end --run-directory <fresh-dir>`，不修改正式 Host Program 参数。只在主屏创建一个正式协议 v1 Renderer/Surface，实验 Raised 仅由诊断装配注入。首帧提交后保持橙色，落盘 active-ready 并让自有 lifecycle 窗口报告 ready，随后才可提示用户手动注销。人工等待最多十分钟，不是五秒自动退出测试；超时只触发自有资源清理，不注销系统。启动等待从 active-starting 中读取 Host 实际 Apply budget，不另设冲突的短总 deadline。拒绝已有配置/证据，所有配置保留在新 artifacts 目录；不创建计划任务、启动项或执行 OS 注销/关机。
+
+退出时在同一原生预算内先保存 `active-exit-evidence.json`，后保存 native 回执；前者记录原提交 generation/SessionIds、每个 Renderer 的 Shutdown/ShutdownCompleted、进程真实退出及句柄释放、Host Surface 最终为零。新的 manifest 显式声明 active evidence，Verify 同时校验两份基础回执、配置、非空唯一且匹配的退休/进程身份，不只相信 Valid 字段。结果写入 `verification-v3.json / ActiveRendererSessionLogoffEvidenceValidated`；缺任意证据、generation/runId 错配、进程或 Surface 残留均失败关闭。旧 v1/v2 样本不重解释、不冒充活动 Renderer 通过。
+
+2026-10-24 该项已通过，P1.9.5 按实现台账的有限关闭表关闭，不追加重复无 Surface 注销或没有边界的全物理矩阵。双屏/P1.9.4 延期、Stage B、allowlist 和产品内容入口仍独立保留。
+
+2026-10-24 首个活动样本 `run-d654e00982c9497ea201a3f2443618aa` 已实际注销：画面人工正常，Runtime/native 清理、Renderer 实际退出与句柄释放、自有 Surface 为零、Assignment 保留均通过，但 ShutdownCompleted 缺失，`verification-v3.json=IncompleteOrFailed`，保持失败。登录后第三方壁纸接管不能解释注销前已落盘的缺失回执。随后补 Host `0x281` / Renderer `0x280` 的进程局部 shutdown order（读回验证、正常退出恢复）和实际 Renderer ExitCode 诊断，未增加预算、未改协议或放宽 v3 回执门禁。新 Arm 会核对并记录退出级别；失败的旧样本不追改。修正后 Debug/Release 428/428 与上述非可见进程门禁通过，用户再次关停第三方并独立授权了下列真实重测；工具未操作第三方进程或启动项。
+
+修正后重测 `run-7b157be0a83247e5a5af4a323858dda0/verification-v3.json` 已得到 `ActiveRendererSessionLogoffEvidenceValidated`，核验脚本退出码 0。真实 SessionLogoff 的 Runtime/native 回执匹配，native elapsed=72.4434 ms / budget=4000 ms；原 generation=1 的唯一 Session 真正完成 Shutdown/ShutdownCompleted，retirement=30.722 ms、Graceful=True、issues=[]。Renderer 实际 ExitCode=0、进程退出及句柄释放已观察，OwnedSurfaceCount=0、Assignment/策略保留、stderr 为空，人工确认注销前正常、登录后原壁纸。诊断没有注册自启动，登录后原壁纸不等于产品自动恢复已验收；Main/实际 Host 退出码与 native callback 返回仍未观察，不与 Renderer 或核验脚本退出码混淆。结果满足 P1.9.5 最后一项，不意味着真实关机/重启或所有双屏物理组合均已通过。

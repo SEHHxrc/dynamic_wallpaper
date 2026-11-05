@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using LiveWall.Platform.Windows.NativeMethods;
+using LiveWall.Platform.Windows.Lifecycle;
 
 namespace LiveWall.Platform.Windows.Desktop;
 
@@ -46,9 +47,11 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
     private bool sessionNotificationsRegistered;
     private bool accepting = true;
     private bool shutdownRequested;
+    private readonly SessionEndMessageHandler? sessionEndHandler;
 
-    public DesktopWindowDispatcher()
+    public DesktopWindowDispatcher(SessionEndMessageHandler? sessionEndHandler = null)
     {
+        this.sessionEndHandler = sessionEndHandler;
         windowProcedure = WindowProcedure;
         thread = new Thread(RunMessageLoop)
         {
@@ -173,7 +176,7 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
                 DesktopNativeMethods.WindowExStyleNoActivate |
                     DesktopNativeMethods.WindowExStyleToolWindow,
                 className,
-                "LiveWall Shell Signal Window",
+                sessionEndHandler is null ? "LiveWall Shell Signal Window" : "LiveWall Host Lifecycle",
                 0,
                 0,
                 0,
@@ -190,7 +193,7 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
                     "Could not create the Desktop Window Dispatcher signal window.");
             }
 
-            RegisterSystemNotifications();
+            if (sessionEndHandler is null) RegisterSystemNotifications();
 
             ready.TrySetResult();
             while (!shutdownRequested)
@@ -242,6 +245,8 @@ internal sealed class DesktopWindowDispatcher : IDesktopWindowDispatcher
 
     private nint WindowProcedure(nint window, uint message, nuint wParam, nint lParam)
     {
+        if (sessionEndHandler?.TryHandle(message, wParam, lParam, out nint exitResult) == true)
+            return exitResult;
         if (message == DispatchWorkMessage)
         {
             DrainWorkItems();

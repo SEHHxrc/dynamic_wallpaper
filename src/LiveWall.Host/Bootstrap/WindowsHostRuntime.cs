@@ -25,6 +25,7 @@ internal sealed class WindowsHostRuntime : IAsyncDisposable
     private readonly bool persistConfiguration;
     private WindowsHostRuntimeState state = WindowsHostRuntimeState.Created;
     private Task? stopTask;
+    private CancellationTokenSource? startingCancellation;
 
     public WindowsHostRuntime(
         HostCommandLoop commandLoop,
@@ -60,28 +61,58 @@ internal sealed class WindowsHostRuntime : IAsyncDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        Transition(WindowsHostRuntimeState.Created, WindowsHostRuntimeState.Starting);
+        CancellationTokenSource startup;
+        lock (gate)
+        {
+            if (state != WindowsHostRuntimeState.Created)
+                throw new InvalidOperationException($"Host runtime cannot start from {state}.");
+            state = WindowsHostRuntimeState.Starting;
+            startup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            startingCancellation = startup;
+        }
         try
         {
-            SetState(WindowsHostRuntimeState.Restoring);
+            lock (gate)
+            {
+                startup.Token.ThrowIfCancellationRequested();
+                state = WindowsHostRuntimeState.Restoring;
+            }
             BootstrapResult = await bootstrapper.InitializeAsync(
                     commandLoop,
                     displayTopologySource.Current,
-                    cancellationToken)
+                    startup.Token)
                 .ConfigureAwait(false);
 
-            eventBridge.Start();
-            eventBridge.RequestEnvironmentValidation();
-            _ = await commandLoop.SendAsync(new GetHostStateCommand(), cancellationToken)
+            lock (gate)
+            {
+                startup.Token.ThrowIfCancellationRequested();
+                eventBridge.Start();
+                eventBridge.RequestEnvironmentValidation();
+            }
+            _ = await commandLoop.SendAsync(new GetHostStateCommand(), startup.Token)
                 .ConfigureAwait(false);
-            SetState(WindowsHostRuntimeState.Running);
+            lock (gate)
+            {
+                startup.Token.ThrowIfCancellationRequested();
+                state = WindowsHostRuntimeState.Running;
+            }
         }
         catch (Exception exception)
         {
-            LastFault = exception;
-            SetState(WindowsHostRuntimeState.Faulted);
+            bool stoppedDuringStartup;
+            lock (gate)
+            {
+                stoppedDuringStartup = state is WindowsHostRuntimeState.Stopping or WindowsHostRuntimeState.Stopped;
+                if (!stoppedDuringStartup) { LastFault = exception; state = WindowsHostRuntimeState.Faulted; }
+            }
             await StopAsync(CancellationToken.None).ConfigureAwait(false);
+            if (stoppedDuringStartup) throw new OperationCanceledException("Host stopped during startup.", exception, startup.Token);
             throw;
+        }
+        finally
+        {
+            lock (gate) { startingCancellation = null; }
+            startup.Dispose();
         }
     }
 
@@ -89,6 +120,11 @@ internal sealed class WindowsHostRuntime : IAsyncDisposable
     {
         if (State != WindowsHostRuntimeState.Running)
         {
+            if (State is WindowsHostRuntimeState.Stopping or WindowsHostRuntimeState.Stopped)
+            {
+                await StopAsync(CancellationToken.None).ConfigureAwait(false);
+                return;
+            }
             throw new InvalidOperationException("The Windows Host runtime is not running.");
         }
 
@@ -108,7 +144,7 @@ internal sealed class WindowsHostRuntime : IAsyncDisposable
         {
             if (stopTask is not null)
             {
-                return stopTask;
+                return stopTask.WaitAsync(cancellationToken);
             }
             if (state == WindowsHostRuntimeState.Stopped)
             {
@@ -116,9 +152,24 @@ internal sealed class WindowsHostRuntime : IAsyncDisposable
             }
 
             state = WindowsHostRuntimeState.Stopping;
-            stopTask = StopCoreAsync(cancellationToken);
-            return stopTask;
+            TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            stopTask = completion.Task;
+            startingCancellation?.Cancel();
+            // A caller may stop waiting, but must not cancel the shared resource
+            // cleanup or skip persistence for every other Shutdown/Dispose waiter.
+            _ = CompleteStopAsync(completion);
+            return stopTask.WaitAsync(cancellationToken);
         }
+    }
+
+    private async Task CompleteStopAsync(TaskCompletionSource completion)
+    {
+        try
+        {
+            await StopCoreAsync(CancellationToken.None).ConfigureAwait(false);
+            completion.TrySetResult();
+        }
+        catch (Exception exception) { completion.TrySetException(exception); }
     }
 
     public async ValueTask DisposeAsync() =>
@@ -150,7 +201,9 @@ internal sealed class WindowsHostRuntime : IAsyncDisposable
                     new GetHostStateCommand(),
                     cancellationToken)
                 .ConfigureAwait(false)).State;
-            if (persistConfiguration && finalState is not null)
+            // Before initialization completes, an empty/partial Host snapshot must
+            // not overwrite the user's existing persisted Assignment.
+            if (persistConfiguration && finalState is not null && BootstrapResult is not null)
             {
                 await bootstrapper.PersistAsync(finalState, cancellationToken)
                     .ConfigureAwait(false);
@@ -181,19 +234,6 @@ internal sealed class WindowsHostRuntime : IAsyncDisposable
 
         LastFault ??= firstFailure;
         SetState(WindowsHostRuntimeState.Stopped);
-    }
-
-    private void Transition(WindowsHostRuntimeState expected, WindowsHostRuntimeState next)
-    {
-        lock (gate)
-        {
-            if (state != expected)
-            {
-                throw new InvalidOperationException(
-                    $"Host runtime cannot transition from {state} to {next}.");
-            }
-            state = next;
-        }
     }
 
     private void SetState(WindowsHostRuntimeState next)

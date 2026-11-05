@@ -16,5 +16,6 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="LiveWall.Application.Tests" />
+    <InternalsVisibleTo Include="VideoPresentationProbe" />
   </ItemGroup>
 </Project>

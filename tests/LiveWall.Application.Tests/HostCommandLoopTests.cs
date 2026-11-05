@@ -22,8 +22,73 @@ using LiveWall.Platform.Windows.Power;
 
 namespace LiveWall.Application.Tests;
 
-public sealed class HostCommandLoopTests
+public sealed partial class HostCommandLoopTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DualDisplayShellRecoveryChurnCommitsOnlyFinalLayoutOrSuspends(bool finalEmpty)
+    {
+        TestRuntime runtime = new(true, true, true, true);
+        GatedSessionCoordinator? gate = null;
+        await using HostCommandLoop loop = runtime.CreateCommandLoop(inner =>
+            gate = new GatedSessionCoordinator(inner, int.MaxValue, blockedRecoveryCall: 1));
+        DisplayTopology initial = CreateDualDisplayTopology() with { Revision = 1 };
+        await loop.SendAsync(new DisplayTopologyChangedCommand(initial), CancellationToken.None);
+        HostCommandResult apply = await loop.SendAsync(CreateApplyCommand() with
+        { Displays = initial.Displays.Select(display => display.Id).ToArray() }, CancellationToken.None);
+        await loop.WaitForApplyGenerationAsync(apply.State!.Generation, CancellationToken.None);
+        HostCommandResult recovering = await loop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
+        await gate!.Prepared.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            await loop.SendAsync(new DisplayTopologyChangedCommand(new(2, [initial.Displays[0]])), CancellationToken.None);
+            await loop.SendAsync(new DisplayTopologyChangedCommand(new(3, [])), CancellationToken.None);
+            DisplayTopology final = new(4, finalEmpty ? [] :
+                [initial.Displays[0] with { ScaleFactor = 1.75 }, initial.Displays[1] with
+                { Bounds = new DisplayBounds(-2560, 0, 2560, 1440), ScaleFactor = 1.5 }]);
+            await loop.SendAsync(new DisplayTopologyChangedCommand(final), CancellationToken.None);
+            await loop.SendAsync(new ExplorerRestartedCommand(), CancellationToken.None);
+            foreach (long revision in new long[] { 2, 3 })
+            {
+                DisplayReconciliationResult superseded = await loop.WaitForDisplayReconciliationAsync(revision, CancellationToken.None);
+                superseded.TerminalState.Should().Be(DisplayReconciliationTerminalState.Cancelled);
+                superseded.SupersessionCause.Should().Be(DisplayReconciliationSupersessionCause.NewerTopology);
+                superseded.Timeline.Should().NotContain(entry => entry.Phase == DisplayReconciliationPhase.SurfacesReplaced);
+            }
+            runtime.Desktop.Replacements.Should().ContainSingle();
+            gate.Release();
+            DesktopRecoveryResult recovery = await loop.WaitForDesktopRecoveryAsync(recovering.State!.Generation,
+                CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(4));
+            recovery.TerminalState.Should().Be(DesktopRecoveryTerminalState.Succeeded);
+            recovery.CompletionMode.Should().Be(DesktopRecoveryCompletionMode.Rebuilt);
+            DisplayReconciliationResult reconciled = await loop.WaitForDisplayReconciliationAsync(4, CancellationToken.None);
+            reconciled.TerminalState.Should().Be(DisplayReconciliationTerminalState.Succeeded);
+            HostStateSnapshot committed = await GetStateAsync(loop);
+            committed.DisplayTopology.Should().Be(final);
+            committed.Assignments.Should().HaveCount(2);
+            committed.Sessions.Should().HaveCount(finalEmpty ? 0 : 2);
+            runtime.Desktop.Replacements.Should().HaveCount(finalEmpty ? 1 : 2);
+            runtime.Provider.SessionCount.Should().Be(finalEmpty ? 2 : 4);
+            runtime.Desktop.ResizedSurfaces.Should().BeEmpty();
+            loop.GetRecoveryOperationIdsForDiagnostics().Should().ContainSingle();
+            // Suspend keeps the abandoned reattach milestones as history; it must
+            // not invent a new generation or commit those previously ready frames.
+            if (finalEmpty)
+                recovery.Timeline.Should().NotContain(entry => entry.Phase == DesktopRecoveryPhase.SurfacesReplaced);
+            else
+                recovery.Timeline.Count(entry => entry.Phase == DesktopRecoveryPhase.FirstFramePresented &&
+                    entry.HostGeneration == recovery.FinalHostGeneration && entry.Outcome == ApplyStageOutcome.Success)
+                    .Should().Be(2);
+            for (int index = 0; index < 2; index++)
+                (await runtime.Provider.WaitForSessionAsync(index, CancellationToken.None)).IsDisposed.Should().BeTrue();
+            foreach (PreparedSession session in loop.GetPreparedSessionsForDiagnostics())
+                session.Surfaces.Single().Request.Bounds.Should().Be(final.Displays.Single(display =>
+                    display.Id == session.Session.Displays.Single()).Bounds);
+        }
+        finally { gate.Release(); }
+    }
+
     [Fact]
     public async Task JoinedTopologyFailureSharesRecoveryCircuitTerminalWithoutHalfCommit()
     {
@@ -308,6 +373,7 @@ public sealed class HostCommandLoopTests
                     2, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
                 topology.TerminalState.Should().Be(DisplayReconciliationTerminalState.Cancelled);
                 topology.FailureReason.Should().Be(ApplyFailureReason.Superseded);
+                topology.SupersessionCause.Should().Be(DisplayReconciliationSupersessionCause.ShellGenerationChanged);
             }
             DesktopRecoveryResult recovered = await loop.WaitForDesktopRecoveryAsync(
                 recovery.State!.Generation, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
@@ -3683,14 +3749,20 @@ public sealed class HostCommandLoopTests
         }
 
         public UserPlaybackPolicy? SavedPolicy { get; private set; }
+        public TaskCompletionSource? LoadGate { get; init; }
+        public TaskCompletionSource LoadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public IReadOnlyList<WallpaperAssignment>? SavedAssignments { get; private set; }
 
-        public Task<HostConfigurationLoadResult> LoadAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(new HostConfigurationLoadResult(
+        public async Task<HostConfigurationLoadResult> LoadAsync(CancellationToken cancellationToken)
+        {
+            LoadEntered.TrySetResult();
+            if (LoadGate is not null) await LoadGate.Task.WaitAsync(cancellationToken);
+            return new HostConfigurationLoadResult(
                 configuration,
                 ConfigurationFileStatus.Loaded,
-                ConfigurationFileStatus.Loaded));
+                ConfigurationFileStatus.Loaded);
+        }
 
         public Task SavePlaybackPolicyAsync(
             UserPlaybackPolicy policy,
@@ -3730,14 +3802,18 @@ public sealed class HostCommandLoopTests
 
         public int DisposeCount { get; private set; }
 
+        public TaskCompletionSource? StopGate { get; init; }
+        public TaskCompletionSource StopEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public void Start() => StartCount++;
 
         public void RequestEnvironmentValidation() => ValidationCount++;
 
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
             DisposeCount++;
-            return ValueTask.CompletedTask;
+            StopEntered.TrySetResult();
+            if (StopGate is not null) await StopGate.Task;
         }
     }
 
@@ -3813,6 +3889,7 @@ public sealed class HostCommandLoopTests
             new HashSet<string>());
 
         public int SessionCount => sessions.Count;
+        public Action<FakeRendererSession>? ConfigureSession { get; set; }
 
         public RendererMatch Match(WallpaperDefinition wallpaper, RuntimeEnvironment environment) =>
             new(wallpaper.Kind == WallpaperKind.Video, 100, "Test renderer");
@@ -3824,6 +3901,7 @@ public sealed class HostCommandLoopTests
             bool autoPresent = sessions.Count < autoPresentFirstFrame.Length &&
                 autoPresentFirstFrame[sessions.Count];
             FakeRendererSession session = new(context.SessionId, context.Generation, autoPresent);
+            ConfigureSession?.Invoke(session);
             sessions.Add(session);
             return Task.FromResult<IRendererSession>(session);
         }
@@ -3865,6 +3943,9 @@ public sealed class HostCommandLoopTests
         public ConcurrentQueue<RendererCommand> Commands { get; } = new();
 
         public bool IsDisposed { get; private set; }
+        public int DisposeCount { get; private set; }
+        public string? BlockCommand { get; set; }
+        public TaskCompletionSource CommandBlocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int? FailAttachOnCount { get; set; }
 
@@ -3883,9 +3964,14 @@ public sealed class HostCommandLoopTests
         public IAsyncEnumerable<RendererEvent> ReadEventsAsync(CancellationToken cancellationToken) =>
             events.Reader.ReadAllAsync(cancellationToken);
 
-        public Task SendAsync(RendererCommand command, CancellationToken cancellationToken)
+        public async Task SendAsync(RendererCommand command, CancellationToken cancellationToken)
         {
             Commands.Enqueue(command);
+            if (command.GetType().Name == BlockCommand)
+            {
+                CommandBlocked.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
             if (command is AttachRendererSurface attach)
             {
                 attachCount++;
@@ -3897,7 +3983,7 @@ public sealed class HostCommandLoopTests
 
                 if (SuppressSurfaceAttachedOnCount == attachCount)
                 {
-                    return Task.CompletedTask;
+                    return;
                 }
 
                 events.Writer.TryWrite(new RendererSurfaceAttached(currentGeneration));
@@ -3908,7 +3994,7 @@ public sealed class HostCommandLoopTests
                         "renderer.test.recovery_crash",
                         "Simulated Renderer failure after SurfaceAttached.",
                         Recoverable: true));
-                    return Task.CompletedTask;
+                    return;
                 }
 
                 if (autoPresentFirstFrame && attachCount > 1 &&
@@ -3947,7 +4033,6 @@ public sealed class HostCommandLoopTests
                 }
             }
 
-            return Task.CompletedTask;
         }
 
         public void PresentFirstFrame()
@@ -3964,6 +4049,7 @@ public sealed class HostCommandLoopTests
 
         public ValueTask DisposeAsync()
         {
+            DisposeCount++;
             IsDisposed = true;
             events.Writer.TryComplete();
             return ValueTask.CompletedTask;
@@ -3973,6 +4059,12 @@ public sealed class HostCommandLoopTests
     private sealed class FakeDesktopHost : IDesktopHost
     {
         private int nextSurfaceId;
+        public int CreatedSurfaceCount => Volatile.Read(ref nextSurfaceId);
+        public bool FailDestroy { get; set; }
+        public bool BlockReplacement { get; set; }
+        public TaskCompletionSource ReplacementEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int? BlockTopologyOnCall { get; set; }
+        public TaskCompletionSource TopologyEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public ConcurrentQueue<SurfaceId> DestroyedSurfaces { get; } = new();
 
@@ -3991,18 +4083,23 @@ public sealed class HostCommandLoopTests
 
         public int EnsureTopologyCallCount { get; private set; }
 
-        public Task<DesktopTopology> EnsureTopologyAsync(
+        public async Task<DesktopTopology> EnsureTopologyAsync(
             DisplayTopology displays,
             CancellationToken cancellationToken)
         {
             EnsureTopologyCallCount++;
+            if (EnsureTopologyCallCount == BlockTopologyOnCall)
+            {
+                TopologyEntered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
             if (TransientTopologyFailuresRemaining > 0)
             {
                 TransientTopologyFailuresRemaining--;
                 throw new InvalidOperationException(
                     "UnexpectedTopologyMutation: simulated transient Shell mutation.");
             }
-            return Task.FromResult(new DesktopTopology(displays.Revision, []));
+            return new DesktopTopology(displays.Revision, []);
         }
 
         public Task<DesktopSurface> CreateSurfaceAsync(
@@ -4016,10 +4113,15 @@ public sealed class HostCommandLoopTests
                 (ulong)id));
         }
 
-        public Task ReplaceSurfacesAsync(
+        public async Task ReplaceSurfacesAsync(
             SurfaceReplacement replacement,
             CancellationToken cancellationToken)
         {
+            if (BlockReplacement)
+            {
+                ReplacementEntered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
             cancellationToken.ThrowIfCancellationRequested();
             Replacements.Enqueue(replacement);
             if (TransientReplacementFailuresRemaining > 0)
@@ -4034,7 +4136,6 @@ public sealed class HostCommandLoopTests
                 throw new InvalidOperationException("Simulated Surface replacement failure.");
             }
 
-            return Task.CompletedTask;
         }
 
         public Task ResizeSurfaceAsync(
@@ -4052,6 +4153,7 @@ public sealed class HostCommandLoopTests
             CancellationToken cancellationToken)
         {
             DestroyedSurfaces.Enqueue(surfaceId);
+            if (FailDestroy) throw new IOException("Simulated Surface cleanup failure.");
             return Task.CompletedTask;
         }
 

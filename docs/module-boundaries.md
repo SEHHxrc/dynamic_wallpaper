@@ -67,6 +67,7 @@ Renderer events ------HostCommand-------> |
 - Renderer/UI 只引用 Contracts；
 - Renderer 会话的 wire 握手与 Application 映射位于 Host；`IRendererProvider.CreateAsync` 只返回已经完成 Hello/Initialize/Initialized 的会话，Platform.Windows 不得处理 Renderer IPC；
 - `DllImport` / `LibraryImport` 只出现在允许的原生边界目录；
+- ADR-011 允许 Video 私有 `NativeMethods/VideoNativeMethods.cs` 管理 Renderer 自有 child/消息泵和进程退出顺序；不提供 Shell API，不改变 Renderer 仅引用 Contracts 的规则。通用 IPC 原语由 Infrastructure 维护并源码链接，不复制协议实现或增加程序集引用；
 - Wallpaper Engine 命名空间不出现在 Renderer；
 - 跨进程公开 DTO 可被 System.Text.Json 往返序列化。
 - `IDesktopHost` 保持 hidden provisional + 批量显式替换语义，且所有自有 HWND 的创建和销毁线程一致。

@@ -1,6 +1,6 @@
 # 实现与验收状态
 
-> 截止日期：2026-09-16。本文只记录可变的工程状态，不改变 `ARCHITECTURE.md`、已接受 ADR 或专题设计中的规范边界。
+> 截止日期：2026-11-03。本文只记录可变的工程状态，不改变 `ARCHITECTURE.md`、已接受 ADR 或专题设计中的规范边界。
 
 ## 状态口径
 
@@ -8,6 +8,201 @@
 - **自动验证通过**：可在测试进程或受控替身中验证实现契约，不等于 Windows Shell 真实兼容。
 - **真实桌面验收通过**：已在声明支持的 Windows 完整 build、显示器和 DPI 矩阵中验证图标层级、恢复与清理。
 - **未接受**：不得用于生产能力声明，也不得加入 build allowlist。
+
+## 当前阶段：C1 有限范围关闭，C2 待启动（2026-11-03）
+
+P1.9.5 按下文 E 节既定条件关闭，不追加注销。P1.9.2 双屏系统恢复、P1.9.4 真实并发及双屏仍为 `Deferred / Pending hardware`；不把它们改为 Passed/Waived，也不阻塞 C0 隔离开发。
+
+**C1 已按约定有限范围关闭**：C1.2 单屏正式产品候选及 C1.3 单屏控制/同 Renderer 重附着/正常退休代表项均通过，最小失败收口和未支持能力拒绝已验证。最新 Debug/Release 各 **573/573**。本次控制验收整体退出码 0；Shell WorkerW 前后均为 1、未新增，分类 NotRequired，不表示此前遗留 mutation 已恢复。C2 最小持久视频仓库与正式 Host 内容恢复待启动；双屏/真实 Video Explorer 恢复、长期资源与完整编码矩阵独立保留。Stage B 未接受，生产 allowlist 仍为空。
+
+- **P1.10.0 策略设计完成**：[ADR-010](adr/010-raised-shell-mutation-production-gate.md) 冻结请求前/后/退出后三类基线和两种清理语义。已有 WorkerW 不能算本次创建，新增残留为 CleanupIncomplete，generation/采样不确定为 Inconclusive；不做未经验证的逆消息、不销毁 Shell 窗口、不静默重启 Explorer。生产 mutation 接受仍未关闭，两个 allowlist 保持为空。
+- **C0 物理单屏呈现可行性切片通过并关闭（2026-10-28）**：用户确认 cover 复测“全程没有黑色，其他仍然正常”，结合实际 client/VO 同为 2880×1800、上下边距 0、左右各 -160 的裁切，真实运动画面、循环/暂停恢复、尺寸变化、桌面层级及自有清理在本单屏代表边界内通过。首轮黑边失败原样保留。该历史 wid/gpu-next 后端由独立诊断入口验证，不是产品 provisional/Apply/Replace 或 C1 正式会话验收，不把加载/VO 事件映射为 FirstFramePresented。ShellMutationRecovery 仍为 CleanupIncomplete，生产门禁不因 C0 关闭而放行。
+- **C1.1 代码与非可见验证完成**：ADR-011 已由用户明确接受并同步根架构；正式 Video Program、Hello/Initialize、单接收泵、Wire/路径门禁、阶段超时及自有 child/DComp/交换链提交已接线。新增 37 项 Wire 自动门禁，当时 Debug/Release 各 520/520；正式可执行文件隐藏容器正常/暂停重附着、提前 Shutdown、Pipe 断开与路径拒绝已测，详见下节。后续 C1.2/C1.3 已补单屏人工代表项并按有限范围关闭 C1，默认产品 Host 内容链留给 C2。
+- **开发依赖固定**：shinchiro `20261021 / x86_64 / mpv e471496c56`，项目内 `.cache/libmpv/20261021-x64`，归档 SHA256=`EFC719EFF3DC5954B4A5EFC800632808BCEC01CC9034940DD14E5EB7FE9EA633`，DLL SHA256=`04E4D27DC385DC18DDD93FBE69C75E635B864F3C6EC53A9122DF54C2F7842F4A`。检查实际版本为 `mpv v0.41.0-1227-ge471496c5`、FFmpeg `N-127893-g9a861e968`、client API 2.6。头文件 ISC 不等于 mpv core/FFmpeg 发行许可；该包为 DevelopmentOnlyNotForDistribution，发行审计仍是开放项，不安装到系统或改变全局 PATH。
+- **素材与无桌面预检通过**：本地生成 320×180、24fps、72 帧/3 秒的原始 BGR AVI，移动青色条与橙黄背景，没有第三方媒体。原生 schema v1 manifest 检查通过；素材 SHA256=`8CADEB631BE8B6245B43CFEDC6B9F43F42C750AE4C144E83A9598D3DABADD68C`。fixture 为 `artifacts/diagnostics/video-c0/fixture-v1-20261024`，无桌面实际解码结果为 `artifacts/diagnostics/video-c0/headless-decode-20261024.json`：FileLoaded/PlaybackRestarted=True、time-pos=0.416667，vo=null，无 HWND/GPU/Shell Surface，desktopPresentationValidated=False。不是 D3D11、桌面可见或硬解能力通过。
+- **自动验证**：新增 14 项 C0 路径/哈希、输出证据隔离、确定性视频/索引门禁，Debug/Release 全量均 **442/442**（Domain 12、Application 263、Renderer Contracts 36、Package 23、Windows 108）。C0 工具 Debug/Release 与产品 Video Release 构建零警告/错误；架构边界和差异检查通过。首轮受限环境的合约测试未完成，已中止并将大数组逐元素断言换成 Span 比较；在正常本地 Pipe 权限下重跑新增组 14/14 及两配置全量均通过，未放宽失败门禁。NuGet 审计/格式化工具的沙箱网络或 Pipe 拒绝通过明确的本地权限重试解决，未禁用审计。
+
+最终非可见进程门禁也通过：实际 DLL 版本/完整构建参数保存于 `artifacts/diagnostics/video-c0/library-inspection-20261024.json`；缺少 `--confirm-desktop-presentation` 返回 2，未创建本应拒绝的结果文件/Surface；错误 DLL 哈希返回 1，未加载本地代码。C0 工具包含 PerMonitorV2 manifest，退出时保持 STA pump 直到 libmpv 结束，5 秒正常清理预算之外最多另等 2 秒强制结束自有子进程；环境/拓扑变化不算稳定呈现通过。结果的自有类名已归一化，不把类名内的临时 PID/GUID 写成结构身份。以上门禁均未创建可见视频或改变 Shell。
+
+### C0 首轮物理单屏呈现尝试（2026-10-24，待人工观察确认）
+
+用户明确授权后，在 `26200.9711 / session=12 / WinSta0\Default`、物理单屏 `2880×1800 / 200% / 60 Hz` 执行一次 `--desktop ... --duration-seconds 10 --confirm-desktop-presentation`。只读预检未发现竞争壁纸或残留诊断进程，原始证据为 `artifacts/diagnostics/video-c0/run-76c5350ff3074a89b8170b677b14b5ab.json`。分类 `PresentationAttemptCompleted`、failure=null：Renderer 进程独立、child parent 校验通过；gpu-next/d3d11 已配置，FileLoaded/PlaybackRestarted/VOConfigured 有记录，媒体时间推进，播放重启计数最终为 4（含首次启动，不宣称完整循环次数为 4）；Paused/PauseStable/ResumeAdvanced/ResizeExercised 均 True。Shell generation 与显示拓扑保持。
+
+ShutdownCompleted/ChildDestroyed/HostDestroyed=True，Renderer ExitCode=0，Forced=False，OwnedWindowsRemain=False、OwnedResourcesCleanup=Complete；结束后只读检查 VideoPresentationProbe 进程数为 0。**本轮整体退出码为 6，不是 0**：请求前 Progman 直接子 WorkerW=0，请求后新增并在自有窗口销毁后仍保留 1 个 Shell WorkerW，ShellMutationRecovery=CleanupIncomplete。严格遵守 ADR-010，不把自有清理重命名为 Shell 恢复，不销毁 Shell-owned 窗口，不静默重启 Explorer，不自动重测。原始结果 manualPresentation=NotYetConfirmed、FirstFramePresentedEmitted=False、ProductSessionCreated=False、ProductionAttachmentEnabled=False 保持不变，需用户确认实际运动/循环、暂停/恢复、尺寸及层级后才能登记对应人工项，不能仅凭 VO 就绪推断可见。
+
+### C0 首轮人工反馈与 cover 修正（2026-10-24，尚未重跑可见实验）
+
+用户反馈顶部全程约 1 cm 黑色、底部约 1 cm 偏绿，其余均符合预期，包括约 1 秒暂停。真实视频可见、运动/控制、层级及恢复代表项按反馈记录；**稳定完整覆盖未通过**，不能用 VO 就绪或“其余正常”覆盖黑边，也不能把全程留边算成 ADR-009 的旋转 TransientCoverageGap。原始 JSON 的 manualPresentation=NotYetConfirmed 是当时机器记录，人工补充保存在本台账，不重写旧结果。
+
+代码核对发现明确缺口：生成的 manifest.defaults.fit=cover，但 MpvClient 未配置 fit，16:9 的 320×180 视频按默认比例适配 2880×1800（16:10）时，推导的有效画幅为 2880×1620，上下各留 90 物理像素；与顶部观测相容，但首轮没有实测 client/VO 边距，不能把推导写成已测量的唯一根因。底部绿条有原始素材依据：非运动条区域的顶部 RGB=255,255,0，中部第 0 帧为 255,96,0；底部红色刻意降为 100，第 36 帧原始 RGB=100,168,0。该源数据解释绿色标记，不自动证明最终整体色彩准确。此前笼统描述“橙黄背景”不够清楚，已补分区说明，未重生成素材或改写历史哈希。
+
+修正只在私有后端明确 keepaspect=yes、keepaspect-window=no、video-unscaled=no、panscan=1，按现有 cover 语义等比裁切填满；C0 只接受其原生 fixture 的 cover 配置。没有扩大窗口、拉伸画面或修改 Shell placement/生产 provisional。诊断新增 GetClientRect 采样的 Host/child 尺寸，以及 mpv osd-dimensions 的 w/h、四边距和 cover 参数；缺失/零尺寸/dummy/不一致/正留边不得判几何通过，负边距允许裁切。即使几何全通过，ProvesDesktopPresentation 仍为 False，实际像素和层级仍需人工确认，C1 正式首帧策略尚未实现。
+
+新增 **9** 个留边/缺失/非有限值/覆盖不等于呈现门禁，并在已有 AVI 测试中核对方向标记 RGB；C0 纯门禁合计 23/23，Debug/Release 全量均 **451/451**（Domain 12、Application 263、Renderer Contracts 45、Package 23、Windows 108），Release 工具和产品 Video 构建零警告/错误。真实 DLL 无界面检查 `artifacts/diagnostics/video-c0/library-cover-inspection-20261024.json` 读回 keepaspect=yes/panscan=1；`headless-cover-decode-20261024.json` 解码通过，但 vo=null、viewport 0×0、HasNoLetterbox=False、ProvesDesktopPresentation=False，未伪造 GPU/像素通过。原首轮结果 SHA256 仍为 `B8447E44886F8790E52FDD25D85EB688E709B24D6D5D18C5EA0AC5651078B655`；原素材 SHA256 不变。
+
+### C0 cover 授权复测（2026-10-28，人工反馈待收集）
+
+用户明确同意重新复测，只读检查确认 `26200.9711 / session=14 / WinSta0\Default`、单屏 `2880×1800 / 200% / 60 Hz`，未发现竞争壁纸或残留诊断进程；当前基线无 Progman 直接子 WorkerW。使用相同 libmpv 和相同原始视频（SHA256 均未变化），执行一次约 15 秒的修正后可见探针，原始文件为 `artifacts/diagnostics/video-c0/cover-retest-20261028-ebc2e645ae174de4b933411c50054030.json`，SHA256=`3ACABEDE677F899372075DF62969BF47F0F4EDBDD31D927DDB644B10EF7DBB64`。
+
+结果 `PresentationAttemptCompleted`、failure=null。初始/最终 Host 与 child 实测 client 均为 2880×1800，ChildFillsHost=True；最终 mpv viewport=2880×1800，top=bottom=0，left=right=-160，keepaspect=yes/panscan=1，CoverConfigured/HasNoLetterbox/geometry.validated=True。这是等比裁切而非扩大 HWND或拉伸；和首轮只靠比例计算的推断不同，本次有真实 VO 边距及 client 尺寸记录。Paused/PauseStable/ResumeAdvanced/ResizeExercised=True，Shell generation 与拓扑未变。
+
+ShutdownCompleted/ChildDestroyed/HostDestroyed=True、Renderer ExitCode=0、Forced=False、OwnedWindowsRemain=False，OwnedResourcesCleanup=Complete；结束后探针进程数为 0。请求前 WorkerW=0，退出后新增的 1 个 Shell WorkerW 仍在，所以 ShellMutationRecovery=CleanupIncomplete，**整体进程退出码仍为 6**，不能解释为完全恢复或 Renderer 失败。工具未重启 Explorer、销毁 Shell 窗口或继续运行第二次实验。原始 manualPresentation=NotYetConfirmed、FirstFramePresentedEmitted/ProductSessionCreated/ProductionAttachmentEnabled=False 保留，等待用户确认顶部实际黑边、分区色彩、运动/暂停和层级；几何通过不替代可见像素验收。
+
+本次复测阶段只执行一次已授权的实验、读取证据并同步状态文档，没有修改代码或重新运行全量自动测试；最近代码验证基线仍是 2026-10-24 的 Debug/Release 451/451。当时待收集的人工观察已在下节补齐，原始机器结果不改写；不自动再次运行桌面测试或重启 Explorer。
+
+### C0 物理单屏呈现验收通过，开发切片关闭（2026-10-28）
+
+针对上述唯一 cover 复测样本，用户明确反馈：“不错，这次全程没有黑色，其他仍然正常”。结合前述观察范围，登记该次稳定全覆盖、真实连续运动及循环、约 1 秒暂停/恢复、尺寸变化与恢复、图标/任务栏/普通窗口层级和结束后原壁纸恢复的代表性人工验收通过。背景分区按已说明的黄色/橙黄/偏绿方向标记理解；这不是仪器色准、HDR 或所有颜色管理路径验收。
+
+证据仍对应 `26200.9711 / session=14 / WinSta0\Default`、单屏 `2880×1800 / 200% / 60 Hz`，固定 libmpv 与相同原始 BGR AVI。自动几何与播放记录、正常 ShutdownCompleted、Renderer ExitCode=0、句柄/自有 HWND/进程清理和本次人工观察共同证明：**Renderer-owned libmpv gpu-next/D3D11 可以通过既有 HwndChild 容器进入当前桌面可见合成路径，cover 能填满目标显示器。C0 呈现可行性开发切片按此有限边界关闭，不追加重复色块、视频或注销实验。**
+
+清理结论继续分开：OwnedResourcesCleanup=Complete；本次新增 Shell WorkerW 未自行恢复，ShellMutationRecovery=CleanupIncomplete，整个诊断进程退出码仍为 6。C0 通过不意味着 Raised 请求可撤销，不静默重启 Explorer，不改变 ADR-010 或生产 allowlist。原始 JSON 的 manualPresentation=NotYetConfirmed/FirstFramePresentedEmitted=False 是运行当时机器记录，不靠事后改值伪造程序呈现证明；本节保留用户反馈并关联原文件 SHA256=`3ACABEDE677F899372075DF62969BF47F0F4EDBDD31D927DDB644B10EF7DBB64`，历史首轮失败不追改。
+
+C0 关闭时确认下一切片为 **C1：正式 Video Renderer 协议 v1 会话**，先选择真实首帧呈现判据。该次关闭只补录验收，没有启动新测试；随后获用户同意开始 C1，新增开发和验证记录见下节。C0 的人工反馈、FileLoaded/PlaybackRestart/VO 几何均不能直接代替 C1 运行时 FirstFramePresented。
+
+### C1.0：内部事务与提交门禁、D3D11 Render API 无窗口预检（2026-10-28）
+
+**已实现并自动验证；C1 正式会话和桌面呈现尚未完成。** `VideoSessionTransaction` 是 Renderer 内部单写者事务核，明确 Initialize、Attach、Load、首帧、Bounds、重附着和 Shutdown 的阶段；`VideoFirstFrameGate` 将证据绑定到 session/generation、随机 binding epoch、content revision、操作序号和目标尺寸。首次及重附着只接受 Render/Present/Commit/同步精确成功，缺失、负值或正状态（含 occluded）均不能放行；未绑定到 Renderer child 的离屏帧也不能成为首帧。SetBounds 保留当前 binding/generation，允许同一目标已有帧变换后 Commit；Shutdown/Fault 清除待提交票据，迟到结果不能复活会话。这些均是私有代码，不增加 Wire 字段。
+
+固定版本原生头文件提供 D3D11 Render API，调用方拥有纹理和呈现。C1.0 新增私有 `MpvD3D11RenderContext` 原型，由同一专属 render 线程调用和释放；普通 client API 留在控制线程，context 必须先于 client/native library 释放。C0 wid/gpu-next 与 headless vo=null 路径保留。**C1.0 当时的候选 vo=libmpv 与根架构技术表 gpu-next 不同**，ADR-011 当时为 Proposed，尚未修改正式 Program/架构；随后用户明确接受，当前状态见 C1.1，不再重复申请该决定。
+
+`VideoPresentationProbe --render-api-preflight` 不创建 HWND/DComp target，不访问 Shell，不发送 FirstFramePresented。真实 GPU 将同一原始视频渲染到自有 D3D11 纹理，开发预检读回两帧不同非空 RGB 数据，并检查自身 Present 精确 S_OK；CPU readback 只用于诊断，不是生产帧拷贝方案。内部 10 秒取消预算不是 native hang 的硬进程保证，外层驱动可额外有界结束自己创建的 helper。
+
+预检过程保留三份失败原始文件，均未重写或当成成功：
+
+- `artifacts/diagnostics/video-c1/render-api-c9e98d50e1a44c93babc78f6e525d8db/result.json`：媒体错误，valid=False。
+- `artifacts/diagnostics/video-c1/render-api-logged-27e706e2b988444ca87f02b0bfdc06a1.json`：媒体错误 -15，valid=False。
+- `artifacts/diagnostics/video-c1/render-api-details-af6404f0cdea4365ac2fdf27ecbb456c.json`：媒体错误 -15，valid=False；gpuFailure=null 不等于呈现成功。
+
+核对到预检自身生命周期竞争：render 线程取得两帧后立即释放 context，而控制线程还在读取媒体状态。改为两帧就绪后继续服务，由控制者采样完成再统一退休。修正后的独立结果为 `artifacts/diagnostics/video-c1/render-api-owned-lifetime-1b858b240d654d60b36af72f85609fc5.json`：退出码 0、valid=True、failure/gpuFailure=null、current-vo=libmpv、newVideoFrames=2、distinctPixelHashes=2、PresentResults=[0,0]。成功不倒推历史错误唯一根因，也不能替代尚未建立的 child/DComp 目标或桌面人工验收。结果明确 windowCreated/compositionTargetCreated/shellTouched/firstFramePresentedEmitted/desktopPresentationValidated/formalProtocolSessionValidated 均为 False。
+
+新增 **32/32** 项纯自动测试覆盖严格提交结果、票据隔离、首帧一次性接受、恢复新 binding、Bounds 当前 generation、各阶段退出与迟到证据。2026-10-28 Debug/Release 全量各 **483/483**（Domain 12、Application 263、Renderer Contracts 77、Package 23、Windows 108），日志为 `artifacts/diagnostics/video-c1/full-suite-{debug,release}-20261028.log`。产品 Video 与预检工具 Release 构建均零警告/错误，架构边界 10 项目和差异检查通过。GPU 预检独立于这 483 项测试，不能混称自动协议或桌面验收通过。
+
+C1.0 结束时将正式 Pipe/Envelope、实际目标与提交证据接线列为下一步 C1.1；该后续实施记录如下。C1.0 本身没有启动可见实验，也未完成正式会话，不能将其预检扩大为 C1.1 或桌面成功。
+
+### C1.1：已接受后端、正式会话与隐藏目标验证（2026-10-28）
+
+用户明确接受 ADR-011；状态改为 **Accepted（后端选择已接受，呈现及产品验收待完成）**，根技术表同步为 `vo=libmpv + D3D11 Render API + Renderer-owned DComp/交换链`。C0 wid/gpu-next 保留为历史诊断，不进入正式静默回退。跨进程仍只传 Host 容器 HWND，协议 v1/DTO/Schema 不变。首帧只证明当前目标有效提交，不承诺物理扫描，隐藏 provisional 可以先准备再激活。
+
+正式 `LiveWall.Renderer.Video.Program` 已替换占位：接受 Pipe/SessionId，读取并清除一次性认证环境变量，使用相同受限 Named Pipe/长度帧源码，执行 Hello → Initialize/Initialized。固定哈希后加载开发 DLL，检查实际 client/render exports 与 D3D11 context；不从全局 PATH 选择 libmpv。初始化不返回半可用状态。仅引用 Contracts 产品项目，通用 IPC 原语由 Infrastructure 维护并源码链接；Vortice 使用项目已固定 3.8.3。Renderer 私有 NativeMethods 单文件只包含自有 child/消息泵、Pipe server PID 与进程退出顺序，边界脚本增加精确文件白名单，没有放开其余目录或引入 Shell API。
+
+`VideoRendererSession` 的单接收泵验证版本/session/messageId/payload，投递到 32 项有界队列，控制 actor 唯一修改事务状态/发事件；每连接命令 ID 上限 65536，耗尽失败关闭，不淘汰后重放。JSON 严格校验数字类型和属性大小写，不将字符串数值强转为 generation/协议版本，未知附加字段仍可忽略。初始化及阶段预算各 10 秒。有效 Shutdown 可抢占 Initialize/Attach/Load/首帧，清理完成才回执；迟到有效提交也被取消门禁丢弃。清理失败不能发送 ShutdownCompleted，Dispose 不重复。空闲时控制 actor 检查 client 健康，GPU worker 错误也能终止会话，不必等待新命令。native 调用不合作时仍依赖 Host 最终自有进程预算，不将 CTS 称为硬终止保证。
+
+`MpvVideoBackend` 的专属 STA render 线程拥有持久 D3D11 device/immediate context/Render Context 及 HWND 消息泵，每 binding 创建全新 child/DComp target/交换链。parent 必须属于当前 Pipe server PID；窗口 noactivate/tool/disabled，实际 client 尺寸与票据核对。普通 client API 在控制侧；更新回调只唤醒，不反向等待。重附着不销毁 core/context，暂停时将当前有效视频帧重新 Render/Present/Commit；FrameSequence 是提交序列，不要求时间推进。首次/重附着同步使用 WaitForCommitCompletion，连续播放不逐帧同步或读回；Bounds 对既有帧变换并 Commit 后确认当前 Renderer generation。SetFit 白名单和 SetVolume 范围检查已接入，音频初始为零音量且静音；持续音频/性能能力仍未验收。
+
+头文件补齐与哈希已记录在 `tools/libmpv-render-api.lock.json`：固定提交 e471496c56；render.h SHA256=`F2550AA29B2E9B20988BD954B4383E9FA05FD9E40D1669FBC6EDF2AFAC603F15`，render_d3d11.h SHA256=`7B880453EE3C780B0D0F1C3F8ECAA1D23B289522F4C687E6857C8475F4A3F6FB`。DLL/原视频哈希与 C0 一致，均仅在项目缓存，未做发行许可或硬解结论。
+
+新增 **37/37** 项真实长度帧/Pipe + 假后端门禁。最终修正后的 Debug/Release 全量各 **520/520**（Domain 12、Application 263、Renderer Contracts 114、Package 23、Windows 108）；日志为 `artifacts/diagnostics/video-c1/c11-final-suite-{debug,release}-20261028.log`。实际原生实验与自动测试数分开：
+
+| 隐藏容器场景 | 原始结果 | 结论 |
+|---|---|---|
+| 正常完整会话（最终严格 Wire） | `artifacts/diagnostics/video-c1/formal-strict-normal-5f7800f571ae4d129b551e4cdaa2a767.json` | valid=True；3 次首帧分别为初始/Bounds/暂停重附着；child 归属/parent/尺寸和回执前销毁通过，ShutdownCompleted、ExitCode=0、未强制结束、自有 Host/child 清理 |
+| Attach 后提前 Shutdown | `artifacts/diagnostics/video-c1/formal-hidden-shutdown-after-attach-833fe013427f4faab6b6d91e8b281952.json` | valid=True；零首帧，正常回执/ExitCode=0，自有资源清理 |
+| Attach 后 Pipe 断开 | `artifacts/diagnostics/video-c1/formal-hidden-disconnect-after-attach-8d963cb0f3b94d8c82f84effaa53c446.json` | 预期失败门禁 valid=True；Renderer ExitCode=1，未伪报正常 Shutdown，零首帧、无 child 残留 |
+| 非法路径强类型拒绝 | `artifacts/diagnostics/video-c1/formal-corrected-invalid-path-efc173a5074248ef967c6bc2fbfb74fa.json` | 预期失败门禁 valid=True；ContentInvalidPath、零首帧、ExitCode=1、自有资源清理 |
+
+加强拒绝码核验时保留一份失败 `formal-final-invalid-path-48d08c752c9d4def9c8c2cf630681caf.json`：路径已拒绝并清理，但被错误归为协议状态错误，valid=False。修正 Resolve 异常筛选遗漏 InvalidDataException，并让 8 个路径测试全部断言 ContentInvalidPath；上表新样本通过，旧样本不改写。更早宽口径样本也原样保留，不能改成已经通过后加的严格拒绝码门禁。
+
+这些实验均没有访问/修改 Shell，desktopPresentationValidated/productionAttachmentEnabled=False；既有 WorkerW mutation 没有在本轮尝试恢复。**C1.1 代码与自动/隐藏目标验证完成，实际单屏桌面验收待执行，C1 整体继续 In progress。** 下一步应为显式、限时的正式 Video 桌面代表验收及产品候选组合；默认 Host Video Provider/仓库属于后续接线。Throttle/完整属性/遥测、持续资源/音频、硬解/拷贝、编码和环境矩阵仍未完成。C2/C3、发行审计、P1.9.2/P1.9.4 延期、Stage B `In progress / Not accepted` 和两个空生产 allowlist 保留。
+
+### C1.2：正式 Video 产品候选入口就绪，单屏人工验收待批准（2026-10-29）
+
+显式 `DesktopHostDiagnostics --video-product-candidate` 已接入同一 `RendererProductCandidateDiagnostics.RunAsync`：HostCommandLoop → SessionCoordinator → Raised 诊断 override/lease/Native Surface Factory → 正式 RendererProcessProvider/RendererProtocolSession → 正式 Video Program → 全部首帧 → 一次 Replace → 独立 retirement。通过强类型 VideoAssets 选择已固定的视频原生 fixture 与开发 DLL，默认色块候选不变；没有复制一套简化握手、改默认生产组合根或持久化实验兼容配置。素材/库检查先于桌面适配器请求，要求本地绝对非 reparse 路径、固定 manifest/权限/cover/mute、媒体与 DLL 哈希匹配；这不是 C2 通用导入或持久仓库。
+
+新入口必须显式 `--confirm-desktop-presentation`；缺少时退出码 2，尚未读取 Shell、创建 Surface 或启动 Renderer。仅支持当前主屏单 Surface，显示时间从 Apply Succeeded/Replace 完成开始计算，默认 10 秒、上限 30 秒；准备阶段保留真实 Apply deadline，不引入 15 秒外层超时。该首轮是连续运动视频，不主动暂停、调整显示或重启 Explorer。Ctrl+C 触发取消，已提交资源也走独立 retirement。
+
+只读 `--preflight-only` 不需要呈现批准，只校验资产、显示拓扑和 Shell 执行上下文。`ready=True` 只证明这些前提，attachmentValidationDeferred=True；它不发送 Raised 请求、不创建 Surface/Renderer，也不证明能力或像素。运行前、请求后和清理后的结构快照脱敏保存；Shell HWND/PID 仅在运行期参与 generation/WorkerW 身份比较，不写成持久身份。新增 WorkerW 残留仍返回 6/CleanupIncomplete，采样或身份不确定为 Inconclusive，不用 NoNewWorkerObserved 冒充恢复。自有清理与 Shell 恢复分开，原始 manualPresentation=NotYetConfirmed 不因后续反馈而改写。
+
+`tools/run-video-product-candidate.ps1` 提供可审查的 Release 入口，不运行 dotnet run/MSBuild。只临时选择项目 .dotnet 运行时，不改全局 PATH、配置或启动项；正常/失败/取消后恢复三个进程环境变量。首次脚本检查发现 PowerShell 将原来的 null 恢复为空值，已改为对原本不存在的变量显式删除；未设置、空值、已有值三种恢复门禁均通过。该检查的原始只读结果保留，没有改写成可见实验。
+
+新增 **26/26** 项自动门禁，覆盖呈现确认/只读分离、时限/参数、fixture Video 类型与权限、WorkerW 三基线/句柄复用拒绝、Attach/Content/FirstFrame 超时零提交和提交后取消清理。最终 Debug/Release 各 **546/546**（Domain 12、Application 289、Renderer Contracts 114、Package 23、Windows 108），日志 `artifacts/diagnostics/video-c1/c12-suite-{debug,release}-20261029.log`。诊断工具 Release 构建零警告/错误，架构边界及差异检查通过；正式 Renderer DTO/Schema/协议版本均不变。
+
+真实产品链的隐藏容器预检：`artifacts/diagnostics/video-c1/product-chain-hidden-418a4852c3d54abf93ddc36eb8b83c24.json`，SHA256=`7A1B3AA2B63A0D1BCC78CA883F71A84C66089CCD6C62DDE397BC746FB10A01B3`。真实 Host 编排/Provider/Video 进程通过，Apply generation=1、Succeeded、首帧后 replacementCount=1；Apply 耗时约 551.4 ms（单次记录，不设 SLA），ShutdownCompleted=True、Renderer ExitCode=0、Graceful/OwnedResourcesCleaned=True，Host Surface 已销毁。只替换了 IDesktopHost 为不可见自有容器，**没有验证 Raised lease/Factory 或桌面像素**；attachmentBackendValidated/desktopPresentationValidated/productionAttachmentEnabled=False。
+
+最终只读预检：`artifacts/diagnostics/video-c1/desktop-readonly-final-15be9a39b86f44ee998ea4ce9a2abb41.json`，SHA256=`3495F16EEC273553372046229D566EDE19F2D724211F5DB14633DAA2D0144542`。当前为 `26200.9711 / session=14 / WinSta0\Default`，物理单屏 2880×1800、200%；ready=True、attachmentValidationDeferred=True，shellRequestSent/surfaceCreated/rendererStarted=False。这不是“0 候选”或可见测试结果。尚未执行带确认的实际入口，等待用户批准约 10 秒的连续视频代表验收。
+
+C1.2 在 2026-10-29 的状态为代码/自动/隐藏产品链完成，可见单屏验收待批准；随后首轮结果如下。C1 整体仍 In progress，默认生产 Video Provider/持久库及 C2/C3 未启用。
+
+#### C1.2 首轮可见实验：提交成功，进程退出失败（2026-11-02）
+
+用户明确批准后仅执行一次主屏 10 秒连续视频实验，环境为 `26200.9711 / session=17 / WinSta0\Default / 2880×1800 / 200%`。原始证据为 `artifacts/diagnostics/video-c1/c12-desktop-direct-20261102-0e8f762bf9e447f2814f4af51a2acd16.json`，SHA256=`461B1A5BC6B6B1D37FB58329AE97AAE2D6451A4AAF57D4EE10E233035F475A20`。Apply generation=1 Succeeded，FirstFramePresented 约 1333.3 ms，唯一一次 SurfacesReplaced 约 1354.1 ms；提交后计时 10 秒。ShutdownSent/ShutdownCompleted/RendererDisposed/SurfacesCleaned 均为 True，retirement 约 385.9 ms，自有窗口为零、进程已退出，但保留的实际进程句柄读得 ExitCode=-1，最终 `CandidateFailed / exitCode=8`。人工画面尚未确认，原始 `manualPresentation=NotYetConfirmed` 不改写。
+
+该版本的 `retirement.graceful=True` 只表示收到 ShutdownCompleted；外层 `ownedResourcesCleanup=Incomplete` 又混合了非零退出码条件，不能从这些旧字段推断仍有自有窗口。后续诊断已独立报告自有资源清理和 `gracefulRetirement`：资源已销毁、窗口为零、全部进程退出才算自有清理完成；还须回执及全部实际退出码为 0 才能通过正常退休。非零退出仍返回 8，不放宽验收；本轮旧 JSON 保持原样。
+
+Shell 请求前直接子 WorkerW=0、退出后=1，新增 1 个 Shell-owned WorkerW，`ShellMutationRecovery=CleanupIncomplete`。没有发送逆消息、销毁 Shell 窗口或重启 Explorer；自有清理不替代 Shell mutation 恢复。首次 `.ps1` 启动被当前 Windows PowerShell 执行策略拒绝，发生在脚本执行及 Surface/Renderer 创建之前，单独保存 launcher 记录；未修改执行策略，改为直接运行同一已构建 Release exe，此前失败不算额外桌面样本。
+
+受控 Pipe 测试在修复前可稳定复现：ShutdownCompleted 后延迟 50/150 ms 正常返回的进程，仍被 Host Dispose 强制终止。修复将有效回执与进程终止分开：已回执进程有独立最多 1 秒正常退出等待，逾期强制终止后再有限等待；未回执或被 abandon 的会话不获得正常退出宽限。等待属于既有 Renderer Dispose 预算，不链接 Apply deadline。重复/并发 Dispose 等待同一完成任务，进程句柄只释放一次；不改变 DTO、Schema、协议版本或生产装配。
+
+新增 7 项退出门禁及 6 项清理分类门禁；Debug/Release 各 **559/559**（Domain 12、Application 302、Renderer Contracts 114、Package 23、Windows 108），日志为 `artifacts/diagnostics/video-c1/c12-exit-fix-suite-{debug,release}-20261102.log`。修复前失败日志单独保留。本轮修复不关闭 C1.2 可见验收，修复后不得自动重播；C0 原始事实、Shell mutation 门禁、P1.9.2/P1.9.4 延期、Stage B `In progress / Not accepted` 和两个空生产 allowlist 不变。
+
+修复后的真实隐藏产品链证据：`artifacts/diagnostics/video-c1/product-chain-hidden-exit-fix-built-20261102-8e2ea296d0b347b8b024b3e80233eade.json`，SHA256=`E1BFB1C82EA7A2C7D9633B4DFDB61D75FDA5C105514F6786B5D6FEDDEC7937D7`。valid=True、replacementCount=1、ShutdownCompleted=True、实际 Renderer ExitCode=0、Graceful/OwnedResourcesCleaned=True、Host Surface 已销毁；retirement 约 365.6 ms。该复核没有触碰 Shell 或显示桌面视频，desktopPresentationValidated=False；不替代可见复测。
+
+首次隐藏复核 `product-chain-hidden-exit-fix-20261102-00a510e1c47e48bc8bcaf727e92555a7.json` 为 PipeConnected 握手超时、零 Replace、隐藏 Host Surface 已清理，SHA256=`72193D7C73839705BF7B7D0EFD867D17F7089206C23BE2B41D6CA848AC9D456F`。所选 x64 Release Video DLL 当时仅 4608 字节，属于未显式重建的旧输出；全量 test 成功不保证非测试可执行文件已更新。随后显式构建 DesktopHostDiagnostics 及其正式 Video 依赖，DLL 更新至 99840 字节，再得到上列成功记录。失败原样保留，不将该次超时改写成退出修复通过。诊断工具和隐藏探针 Release 显式构建均零警告/错误，项目引用、P/Invoke、Renderer 格式边界复核及 git diff --check 通过；当前脚本执行策略未调整。
+
+2026-11-03 用户补充“确实完整覆盖”，因此将上述 2026-11-02 首轮实验的**主屏四边覆盖人工项登记为 Passed**。本条反馈仅确认覆盖，未将连续运动、图标/任务栏/普通窗口层级及结束恢复补写为逐项通过，也不视为新的可见实验授权。原始 JSON 的 manualPresentation、CandidateFailed/退出码 8 与 SHA256 保持不变；Renderer ExitCode=-1 和 Shell WorkerW CleanupIncomplete 仍按原始证据保留。此次只补录反馈，没有重新播放视频或运行自动测试；修复后的 10 秒主屏可见复测待明确确认。
+
+#### C1.2 修复后单屏可见复测：呈现与正常退休代表项通过（2026-11-03）
+
+用户单独批准后，先执行只读预检，再执行且仅执行一次主屏 10 秒正式 Video 产品候选。环境为 `26200.9711 / session=1 / WinSta0\Default`，物理单屏 2880×1800、200%；使用已显式构建的 x64 Release 诊断工具及正式 Video Renderer，固定 fixture/libmpv 不变。只读结果为 `artifacts/diagnostics/video-c1/c12-retest-preflight-20261103-52167a945faf489d8f2bfe9544589ef9.json`，ready=True、connected displays=1；预检本身没有发送 Raised 请求或创建 Surface/Renderer。
+
+实际复测证据为 `artifacts/diagnostics/video-c1/c12-desktop-retest-20261103-52167a945faf489d8f2bfe9544589ef9.json`，SHA256=`C07AAA562F64EEA0E538AC274D27B3EF8709362438788522FC88F25AA2648C43`。Apply generation=1、Succeeded，FirstFramePresented 约 1340.7 ms；全部首帧后唯一一次 SurfacesReplaced 约 1361.5 ms，随后显示 10 秒。正常退休约 407.8 ms，ShutdownSent/ShutdownCompleted/RendererDisposed/SurfacesCleaned=True、issues=[]，实际 Renderer ExitCode=0，独立 gracefulRetirement=True、OwnedResourcesCleanup=Complete，自有窗口与实验进程均为零；Shell generation 和显示拓扑均未变化。这关闭了本单屏代表路径中“回执后过早终止进程”的可见复测项，不能将旧 ExitCode=-1 追改为成功。
+
+工具返回后，用户对“四边完整覆盖、青色条连续移动、图标/任务栏/普通窗口始终在上方、结束后恢复原壁纸”明确选择“全部正常”。因此本次正式协议 v1、Renderer-owned libmpv D3D11 Render API、真实 Raised Factory 产品候选的**单屏呈现与正常退休代表项通过**。反馈只补入台账，原始 manualPresentation=NotYetConfirmed 不改写；没有将结果扩大为双屏、暂停/重附着、性能/硬解/编码矩阵或默认生产内容链通过。
+
+Raised 请求前直接子 WorkerW=0、退出后=1，新增并遗留 1 个 Shell-owned WorkerW，ShellMutationRecovery=CleanupIncomplete；因此整轮保持 `CandidateRunCompletedWithShellRecoveryIssue / exitCode=6`，不能记作完整 Shell 恢复或 ValidSuccess。没有销毁 Shell 窗口、发送逆消息、重启 Explorer 或自动重播。C1 整体 In progress、P1.9.2/P1.9.4 延期、Stage B `In progress / Not accepted`、两个空生产 allowlist、默认 Video Provider/持久库及 C2/C3 待接线继续保留。此次没有修改代码或 Renderer v1 DTO/Schema，也没有重跑全量测试；559/559 为上次修复的 Debug/Release 基线。
+
+### C1.3：正式 Video 控制与重附着，代码/自动/隐藏验证完成（2026-11-03）
+
+不重复 C1.2 的连续播放实验；本轮没有显示桌面视频、操作 Shell 或改变显示设置。新增工具入口 `VideoPresentationProbe --host-control-preflight <formalVideoExe> <dll> <fixtureRoot> <freshDirectory> <scenario>`，复用正式 HostCommandLoop、SessionCoordinator、Provider/RendererProtocolSession 和独立 Video Program，仅 IDesktopHost 使用自有隐藏容器。场景为 controls、load-failure、first-frame-timeout、process-exit、pipe-disconnect。
+
+控制 actor 对 Fit、Volume/Mute 和播放状态实际执行后读回 libmpv 状态；Attach/Bounds/重新提交时验证既有设置仍保持。诊断 composition root 仅给本轮子进程设置 `LIVEWALL_VIDEO_CONTROL_EVIDENCE`，Renderer 读取后立即删除环境项；按 CreateNew 写入全新本地非 reparse 路径，最多 512 条只读观测，记录单调耗时、媒体时间、暂停和画幅/音量状态。不记录令牌、Pipe 名称、媒体路径、PID/HWND，不增加 DTO/Schema/遥测能力；默认播放没有该日志或周期采样。
+
+修复三处控制/生命周期边界：后端忽略取消并迟到完成 Playback 时，再检查停止 token，禁止 Shutdown 后回传成功；Host 仅接受匹配已发送命令的播放反馈，旧 generation 的已知迟到控制回执不能放行新 binding 的阶段；正式会话通过独立 ActiveFailure 完成任务向 Host 单写者转发活动期错误，不增加第二个事件消费者。当前活动正式 Renderer 失败后保留 Assignment、移除失效运行会话并有界退休；恢复事务仍拥有共享 Renderer 时，由既有整批恢复路径处理，避免重复清理。
+
+新增 11 项自动门禁（Application 4、Renderer Contracts 7）；最终 Debug/Release 各 **570/570**（Domain 12、Application 306、Renderer Contracts 121、Package 23、Windows 108）。日志为 `artifacts/diagnostics/video-c1/c13-final-suite-{debug,release}-20261103.log`。普通 Release 诊断/Video 输出及 x64 隐藏探针已显式构建，均零警告/错误，避免把旧占位或旧 Host 输出误当最新构建。
+
+五类正式进程隐藏证据汇总：`artifacts/diagnostics/video-c1/c13-evidence-index-20261103-7ef2353a55a34b40a8b733275df8f304.json`，SHA256=`43944B61ACB290298895940C7D9CB1FECF418EAC24EE37A1545C706E90820070`。索引保存各原始结果路径与哈希，不改写旧结果；所有有效案例的隐藏 Host 窗口已清理，最终无 Video/Probe 进程残留，shellTouched/desktopPresentationValidated/productionAttachmentEnabled=False。
+
+| 隐藏场景 | 实际证据 | 有效范围 |
+|---|---|---|
+| controls | 暂停期间媒体时间增量 0；Resume 后推进约 0.5 秒；同一 Renderer 在 synthetic Host recovery 中得到全新 parent/child，模式 Reattached；用户暂停意图及 Fit/Volume/Mute 保持，最终真实 ExitCode=0 | 正式 Host 编排及实际媒体/设置读回；不等于真实 Explorer 重启或可见恢复验收 |
+| Bounds / Fit / Volume | 640×360 child 适配、确认仍为当前 generation=1；四种 Fit 映射读回，音量 0/37/83 与静音变化读回；恢复到新 binding 后仍为 Contain、83、Muted | 不承诺主观听感、音轨/编码或全部可见画幅矩阵；原始 fixture 无音轨 |
+| load-failure | 真实无效本地 AVI 导致 ContentLoaded 阶段失败；新批次零 Replace、旧 Session/Assignment 保持，后续 Apply 成功；真实进程退出码 0/1/0 | 正式媒体加载失败与普通替换回退 |
+| first-frame-timeout | 正式 Renderer 已提交真实首帧，由诊断 IRendererSession 投递过滤器只扣留第二次 Apply 的 FirstFrame 事件；Host 在 FirstFrame 阶段超时，旧会话保持，后续 Apply 成功；真实退出码 0/0/0 | Host 首帧等待/回收门禁；**不是** libmpv/D3D 挂死样本，也不伪称原生提交失败 |
+| process-exit | 只终止本轮自有活动 Renderer；实际退出码 -1，Host 自动接收 renderer.process.exited，活动 Session=0、Assignment 保留、自有清理成功 | 故障退出，不伪造 ShutdownCompleted 或正常退出码 |
+| pipe-disconnect | 关闭本轮 Host 通道，Host 获得明确失败并清理；实际退出码 -1，观测到 Host Terminate=1、句柄 Dispose=1，无 ShutdownCompleted，清理完整 | 断连允许强制结束未回执进程，不将其记作正常退休 |
+
+所有有效故障诊断只在预期失败及清理不变量同时成立时返回 0/ExpectedFailureValidated；实际 Renderer 非零退出码单独保留。首次 process-exit 驱动结果因没有区分 Host 的预期后台失败而记为 valid=False；随后增加 ActiveRendererFailureException 强类型分类，仅接受已验证的该类故障，其他关停异常仍失败。首次 pipe-disconnect 驱动错误要求自然退出码必须为 1，而未回执进程可能被 Host 正确强制结束为 -1；新增真实 Terminate/Dispose 计数后按非零实际退出、无虚假回执与完整清理验收。两份失败路径都在索引 failedSamplesPreserved 中保留，没有将失败覆写或放宽正常退休的 ExitCode=0 要求。
+
+能力边界：Initialize、Attach、Load（空 properties）、Play/Resume/Pause/Suspend、SetBounds、SetFit、SetVolume/Mute、Shutdown 已接入；Throttle、SetProperties、SetAudioFrame、CapturePreview 和连续遥测未实现，未支持的命令以明确错误拒绝，不返回成功。C1.1 的票据/旧尺寸拒绝、暂停新目标提交和准备阶段超时门禁沿用，不重复计算为新原生样本。
+
+以上为 C1.3 初次代码/自动/隐藏验证的状态。随后用户明确要求开始验收，新增并验证了下列共用阶段驱动，完成本轮可见代表项；未重复 C1.2 连续播放实验。
+
+#### C1.3 单屏控制代表验收通过，C1 有限范围关闭（2026-11-03）
+
+显式入口为 `DesktopHostDiagnostics --video-product-candidate --control-recovery --confirm-desktop-presentation ...`，wrapper 对应 `tools/run-video-product-candidate.ps1 -ControlRecovery -ConfirmDesktopPresentation`。固定 Playing、Paused、ReattachedPaused、Resumed 四阶段各约 5 秒，总观察 20 秒，不放宽通用 30 秒上限；若显式给定 duration 必须为 20。每阶段从真实协议反馈/首帧就绪后计时，人工观察等待不受旧 Apply deadline 约束。缺少呈现确认仍拒绝；只读预检不创建 Surface/Renderer。
+
+`VideoControlCandidateDiagnostics` 共用正式 Host 单写者和 Renderer 会话，Pause/Resume 等待当前 generation 的实际反馈；重附着采用诊断合成 Host 恢复命令，创建全新容器/child 后按首帧屏障替换，保留同一 Renderer 和暂停意图。**未重启 Explorer，也没有将此项宣称为真实 Shell generation 恢复测试。** 先用相同驱动完成隐藏预检：`artifacts/diagnostics/video-c1/c13-stage-plan-hidden-20261103-9dd686e11de04ee6a43404750b44dbc0/result.json`，SHA256=`DA104453898EE1523ECE90670E6AE95CE868636C8BE2C5886E60B14F4614D418`，四阶段、fresh Surface、同 Renderer、正常 ExitCode=0 和完整清理通过。
+
+随后仅执行一次获准可见实验，环境为 `26200.9711 / session=1 / WinSta0\Default / 2880×1800 / 200%`。证据：`artifacts/diagnostics/video-c1/c13-control-desktop-20261103-54b77824c4024de5910cbc9785a6d098.json`，SHA256=`148D736081076B6BCB314425BA0E1B5517C1675A4AD7D00E31A5010862E53B43`；同名 `.json.native.jsonl` 为限长只读 libmpv 观测。四阶段实际保留约 5.015/5.006/5.001/5.001 秒；Host generation 1→2，Reattached 成功约 750.1 ms，同一 Renderer、全新 Host/child 已验证。41 个暂停样本的媒体时间增量为 0；恢复后 20 个样本确认时间再次推进，暂停当前帧在新目标上重提，设置保持。
+
+最终 ShutdownSent/ShutdownCompleted/RendererDisposed/SurfacesCleaned=True、issues=[]、retirement 约 364.7 ms，真实 Renderer ExitCode=0、gracefulRetirement=True、OwnedResourcesCleanup=Complete，无实验进程或 LiveWall HWND 残留。Shell WorkerW 为 1→1、addedCount=0，三基线结果 ShellMutationRecovery=NotRequired，整轮 `CandidateRunCompletedAwaitingManual / exitCode=0`。该分类只说明**本轮没有新增 mutation**；此前 C0/C1.2 新增 WorkerW 的 CleanupIncomplete 及 Platform 生产门禁继续保留，不能追改为已恢复。
+
+用户对“先移动、停止约 10 秒（中间重附着但保持同一暂停画面）、再恢复移动、最后恢复原壁纸，全程覆盖及图标/任务栏/窗口层级正常”明确反馈**全部符合预期**。因此 C1.3 的单屏控制/重附着/正常退休代表项关闭。反馈只补台账，原始 JSON 的 manualPresentation 与 classification 不改写；没有自动重播或追加 Explorer 实验。
+
+新增 3 项阶段入口参数/批准/固定时长门禁，最新 Debug/Release 各 **573/573**（Domain 12、Application 309、Renderer Contracts 121、Package 23、Windows 108），日志 `artifacts/diagnostics/video-c1/c13-acceptance-final-suite-{debug,release}-20261103.log`。Release 普通输出和 x64 工具已构建；正式 Host 入口、DTO/Schema/协议版本不变，新增控制参数只属于诊断程序，正式 Host Program 不接受实验开关。
+
+wrapper 的 `-ControlRecovery -PreflightOnly` 另在受限 `WinSta0\CodexSandboxDesktop-*` 上下文运行，记录 `video-product-bfe5442f55cb4560b9afc3a02f69c44b.json`：正确识别 ShellUnavailable、ready=False/退出码 3，controlRecovery=True，未发送请求或创建 Surface/Renderer；三个进程环境变量恢复通过。该只读环境受限结果与上列 WinSta0\Default 可见样本分开，不解释为 Windows 无候选或产品回归。架构边界脚本（10 项目）和差异检查通过。
+
+| C1 约定收口项 | 结论 |
+|---|---|
+| 正式 v1 握手/阶段、Renderer-owned Render API 与目标提交证据 | 代码、自动及原生隐藏验证通过 |
+| 正式产品候选单屏可见首帧、首帧后 Replace、正常退休 | C1.2 代表项通过并关闭，旧失败保留 |
+| 实际播放控制、暂停新 binding、Bounds/设置保持及退出交错 | 隐藏门禁通过，C1.3 单屏可见代表项通过并关闭 |
+| 加载失败、Host 首帧超时、活动崩溃与 Pipe 断开 | 五类隐藏证据按声明范围通过；首帧扣留不冒充 GPU 挂死 |
+| Throttle/完整属性/音频帧/截图/连续遥测 | 首版 C1 未支持，明确拒绝，不以实现扩展能力作为本切片关闭前提 |
+
+**C1 开发与上述有限单屏代表验收关闭；Stage C 整体尚未完成，下一步为 C2 最小持久库/正式 Host 内容恢复。** C2 尚未接线；双屏、真实 Video Explorer 恢复、长期资源、完整编码/硬解/听感/发行矩阵继续独立排期。Stage B `In progress / Not accepted`、Shell mutation 生产启用门禁、P1.9.2/P1.9.4 延期和两个空生产 allowlist 不变。
 
 ## Stage B 台账
 
@@ -34,10 +229,11 @@
 | P1.8.1 拓扑抢占与零显示器安全门禁 | 任何更高 topology revision 一经接受即取消旧 reconciliation 绑定的精确 Apply generation，不再依赖新计划是否创建 Surface；旧 preparation、Renderer/provisional Surface 和 350 ms/1 s/2 s retry delay 均使用同一可取消边界。新增非串行 topology-churn 诊断和 Host 内部 `DisplayTopologyEventForwarder`，关闭 Channel 投递失败可查询并发布失败事件 | 自动覆盖 `Reconfigure→NoChange`、`Reconfigure→Suspend`、retry delay 抢占、FirstFrame 与更高 revision 竞态、旧 provisional 全量清理、原提交 Session 保留和双屏 `Suspend→相同 DisplayIds Resume`。`26200.9445 / WinSta0\Default` 实机 `2→1→2→1→2` 发布 4 个 revision：前三个均 `Cancelled/Superseded`、中间 Replace 为 0，最终 revision 单次 Replace、2 个 Session、graceful/clean、无自有 HWND；用户确认旧双屏橙色全程保持且无覆盖，最终统一恢复。当前 Debug/Release 基线为 0 警告构建和 194/194 测试通过 | P1.8.1 代码、自动及真实快速 revision 抢占门禁关闭。工具不主动禁用最后显示器；零显示器实机登记为条件性 `EnvironmentInconclusive`，自动 Suspend/Resume 门禁已通过。Renderer Protocol/DTO/Schema 和 allowlist 不变 |
 | P1.8-TG0 有限 Transition Guard 探针 | 已实现单目标显示器 90°/270°有限候选区域规划、相邻显示器扣除、有界矩形/面积门禁、`Created→Armed→Observed→Retired` 诊断生命周期和显式命令；Armed 后不存在窗口移动、resize 或再次 Commit 路径 | 规划算法及边界自动验证通过；Debug/Release 为 204/204。`26200.9445 / session=3 / WinSta0\Default` 重复矩阵中，纵→横 `5/5` 完整 GuardVisible；横→纵 4 次完整、1 次 Inconclusive，最终补测明确出现“上方小部分洋红、其余黑色 → 完全洋红 → 黄色”。全部运行均无静态壁纸暴露、相邻屏侵入、层级错误或资源残留 | **TG0 决策关闭：部分可行但严格目标失败。** DWM 能自动揭示 Guard，却不保证整个预测区域原子进入第一可见帧；不进入 TG1、不生产化 Guard、不修改 Host/Application Surface 契约、Renderer Protocol、正式 Replace 或 allowlist。旋转保留 `TransientCoverageGap` 已知限制 |
 | P1.8.2 拓扑语义与 Span 布局安全 | Windows 拓扑源将运行期首个空快照暂存为 `EmptyCandidate`，相隔 350 ms 的第二个连续空快照才发布 Suspend；非空或采样失败取消候选，启动即为空使用独立初始 revision。Span 使用物理像素 union、单 Renderer 和 `scaleFactor=1`；union 与非成员显示器相交时返回强类型布局错误。Raised 竞争检测使用精确 HWND 生命周期注册表排除当前 Host 自有 Surface，不按进程名/PID 放宽 | 自动覆盖空拓扑稳定性、`2→0→2`、Span 几何/成员/失败回退和交集拒绝；Release 基线 `218/218`。实机 Span position、scale-only、`2→1→2` 及同 Host `PerDisplay→Span` 均通过。模式切换 generation 1 为 2 Session/2 Surface、generation 2 为 1 Session/1 Surface，两个 Replacement retirement 与最终 Shutdown 全部 graceful/clean | **P1.8.2 关闭。** pure bounds-only 与物理零显示器保持条件性 `EnvironmentInconclusive`；协议、DTO、Schema 和 allowlist 不变 |
-| P1.9.0 真实 Host 组合根与生命周期 | 已实现同步 `Program`、同线程单实例 Mutex、`WindowsHostCompositionRoot`、`WindowsHostRuntime` 状态机、启动恢复终态等待、启动后环境补采、幂等 Shutdown 和反序释放。Restore 先载入完整持久 Assignment，再只 Apply 在线显示器；失败恢复或离线显示器不会在关停持久化时丢失。Stopping 后拒绝外部变更，迟到 prepared completion 只能终态化并清理 provisional 资源 | 自动覆盖重复 Shutdown、停止后 Apply/拓扑/Explorer 拒绝、FirstFrame 后迟到完成零 Replace、完整 Assignment 保存、Runtime 启停/补采/持久化/一次性释放；随 P1.9.1 合并后的 Debug/Release 总基线为 `224/224`。Release 正式组合根 `--validate-startup` 返回 0 并生成 schema v1 配置 | **生命周期骨架与停止门禁完成。** 生产壁纸仓库和 Video/Web Renderer 产品入口仍未实现，默认组合根只允许加载/保留 Assignment 并失败关闭内容恢复；P1.9.2–P1.9.5 尚未完成，Stage B 与 allowlist 不变 |
-| P1.9.1 `TaskbarCreated` 门禁与真实事件链恢复 | 已实现内部 Explorer 监视端口、350 ms 验证与 2 秒后备链路、验证/转发失败强类型结果、Stopping 丢弃分类，以及只供诊断组合根使用的真实隐藏窗口信号注入和 Explorer 重启入口；默认 `LiveWall.Host` 不暴露实验开关 | 自动覆盖 10 次 burst 严格 No-op、验证异常、fallback outage 去重、真实 Bridge 转发、关停后丢弃和 Dispose 后零投递；Debug/Release 总基线 `224/224`。`26200.9457 / WinSta0\Default` 双屏 No-op 得到 `10 raw / 0 validated changes / 0 recovery / 0 Replace`。真实 Explorer PID `11908→37580` 后得到 `1 raw / 1 validated change / 1 recovery / 1 Replace / 0 duplicate`、终态 `Succeeded + Rebuilt`，退出码 0且无自有 HWND；人工确认两屏同步黑屏、Shell 恢复、同步橙色并还原，全程无半屏或覆盖 | **P1.9.1 关闭。** 本次为整批 `Rebuilt`，不能记作同 Renderer `Reattached`；黑屏属于显式终止 Explorer 的允许窗口。P1.9.2–P1.9.5、生产内容入口和 Shell mutation 策略仍未完成，Stage B 与两类生产 allowlist 不变 |
+| P1.9.0 真实 Host 组合根与生命周期 | 已实现同步 `Program`、同线程单实例 Mutex、`WindowsHostCompositionRoot`、`WindowsHostRuntime` 状态机、启动恢复终态等待、启动后环境补采、幂等 Shutdown 和反序释放。Restore 先载入完整持久 Assignment，再只 Apply 在线显示器；失败恢复或离线显示器不会在关停持久化时丢失。Stopping 后拒绝外部变更，迟到 prepared completion 只能终态化并清理 provisional 资源 | 自动覆盖重复 Shutdown、停止后 Apply/拓扑/Explorer 拒绝、FirstFrame 后迟到完成零 Replace、完整 Assignment 保存、Runtime 启停/补采/持久化/一次性释放；随 P1.9.1 合并后的 Debug/Release 总基线为 `224/224`。Release 正式组合根 `--validate-startup` 返回 0 并生成 schema v1 配置 | **生命周期骨架与停止门禁完成。** 生产壁纸仓库和 Video/Web Renderer 产品入口仍未实现，默认组合根只允许加载/保留 Assignment 并失败关闭内容恢复；后续各切片以本表对应状态为准，P1.9.5 关闭不等于 Stage B 接受或 allowlist 放行 |
+| P1.9.1 `TaskbarCreated` 门禁与真实事件链恢复 | 已实现内部 Explorer 监视端口、350 ms 验证与 2 秒后备链路、验证/转发失败强类型结果、Stopping 丢弃分类，以及只供诊断组合根使用的真实隐藏窗口信号注入和 Explorer 重启入口；默认 `LiveWall.Host` 不暴露实验开关 | 自动覆盖 10 次 burst 严格 No-op、验证异常、fallback outage 去重、真实 Bridge 转发、关停后丢弃和 Dispose 后零投递；Debug/Release 总基线 `224/224`。`26200.9457 / WinSta0\Default` 双屏 No-op 得到 `10 raw / 0 validated changes / 0 recovery / 0 Replace`。真实 Explorer PID `11908→37580` 后得到 `1 raw / 1 validated change / 1 recovery / 1 Replace / 0 duplicate`、终态 `Succeeded + Rebuilt`，退出码 0且无自有 HWND；人工确认两屏同步黑屏、Shell 恢复、同步橙色并还原，全程无半屏或覆盖 | **P1.9.1 关闭。** 本次为整批 `Rebuilt`，不能记作同 Renderer `Reattached`；黑屏属于显式终止 Explorer 的允许窗口。后续系统/并发延期项、生产内容入口和 Shell mutation 策略仍独立保留，Stage B 与两类生产 allowlist 不变 |
 | P1.9.2 系统锁定、显示电源与睡眠恢复 | 已实现完整状态源、单调 revision、WTS/Power 聚合及显式 suspend/resume 通知注册/释放；解锁、点亮和唤醒验证环境后才恢复完整播放策略 | P1.9.2 修复基线 Debug/Release `246/246`，随 P1.9.3.0 最新整体基线 `262/262`。物理单屏基线、锁解 3/3、用户暂停锁解 1/1、S0 Modern Standby 睡眠恢复 2/2 通过，实际命令/回执及清理完整；首个未完成睡眠样本保留 | **自动及物理单屏代表场景通过；双屏系统恢复待补。** 不宣称 P1.9.2 全部关闭，不代表 RDP/用户切换或 Video/Web 动态帧循环通过 |
 | P1.9.3.0 会话状态机与正式事件链 | 已实现 Session 匹配、断开提交门禁、准备取消、最新环境延后处理、revision 关联验证、独立验证预算及可等待会话环境终态 | Debug/Release `262/262`；自动覆盖重复、抢占、迟到结果、Shell/拓扑延后处理、FirstFrame 后零提交、暂停意图、失败/超时、Stopping、恢复取消及离线 Assignment | **本代码/自动切片完成；真实会话实机未验收。** 后续 P1.9.3.1 才进行 RDP/用户切换诊断与人工实验，协议和 allowlist 不变 |
+| P1.9.5 退出竞态与系统结束清理 | 已实现共享 Stop/Dispose、停止后零新提交、后台任务排空、独立退休预算、原生有限等待与双回执、Host/Renderer 进程局部退出顺序及逐 Session 持久清理证据 | Debug/Release `428/428`，受控 Host `5/5`、无 Surface Renderer `2/2`、合成证据 `25/25`；单屏活动 Close、无 Renderer 真实注销及修正后的活动 Renderer 单屏真实注销均通过。最后样本真实收到 ShutdownCompleted、Renderer ExitCode=0、自有 Surface=0，人工确认注销前正常、登录后原壁纸 | **2026-10-24 按 P1.9.5-E 明示边界关闭。** 不扩展为真实关机/重启、双屏退出或全部产品矩阵已验收；旧失败样本保留，P1.9.2/P1.9.4 延期、Stage B 与空生产 allowlist 不变 |
 | Platform.Windows attachment lease | 已实现 | 自动验证 Platform 内部 parent/anchor/backdrop/generation、无句柄能力描述及跨 generation 旧 HWND 不再被显隐/复用 | Shell HWND/PID 不进入 Application、Renderer、持久化或 allowlist；每个新 generation 必须重新发现 |
 | Raised Desktop Surface Factory | 已实现生产形态接线 | 受控 HWND 测试验证 hidden provisional、`WS_EX_NOREDIRECTIONBITMAP`、`DefView > LiveWall > WorkerW`、显式批量激活和清理 | 只消费当前 generation 的内部 lease；不等于当前 build 已获生产支持 |
 | Raised Desktop 生产适配 | 已实现发现和 Factory 调用路径，但 allowlist 关闭 | 自动结构/Factory 契约通过；尚未进行允许生产选择后的完整真实矩阵 | `ValidatedBuilds` 为空，生产 Selector 跳过；不得由诊断成功自动写入 allowlist |
@@ -53,6 +249,151 @@
 
 该入口完成时的 Debug/Release 自动基线为 `277/277`，Release 工具零警告/错误，架构边界检查通过。**入口和自动证据门禁完成；真实会话样本未执行，不能写为实机通过。** 本机 `26200.9457 / EditionID=CoreCountrySpecific`；RDP 按首版范围豁免，本地用户切换保留 `NotValidated`，不再要求先取得 RDP 样本才推进 P1.9.4。所有人工实验仍需显式授权。P1.9.2 双屏系统恢复独立待补；协议、Schema、两个生产 allowlist 和 Stage B 状态不变。
 
+### 当前开发与验收边界（2026-10-23）
+
+**P1.9.4：代码与自动门禁完成，开发切片关闭。真实 Shell/显示拓扑并发及双屏实机验收为 `Deferred / Pending hardware`，生产验收门禁仍待关闭。** 该延期保留测试义务，不是 RDP 的首版范围豁免，也不是实机通过；不阻塞 P1.9.5 开发。下文 10 月 11 日的“尚未关闭”描述是当时历史状态，以本节口径为准。
+
+### P1.9.5-B/C 退出通知与隔离进程验证（2026-10-23）
+
+**P1.9.5 已按 E 节明示边界关闭（2026-10-24）：最后活动 Renderer 单屏真实注销重测通过，真实收到 ShutdownCompleted，Renderer ExitCode=0，自有 Surface 清理为零，双回执及配置保留通过，用户确认注销前正常、登录后原壁纸。** 首轮缺少 ShutdownCompleted 的失败及更早旧样本原分类不变，不以缺少 stdout 尾行推断 Main 返回或实际 Host 退出码。修正后最近一次 Debug/Release 全量 **428/428**（Domain 12、Application 263、Renderer Contracts 22、Package 23、Windows 108），工具构建零警告/错误；另有合成证据 25/25、受控 Host 5/5、无 Surface Renderer 进程 2/2。本轮仅核验真实注销证据和同步状态文档，不重跑或改写旧样本；此前 354/378/379/394/417 等数字为历史基线。P1.9.2/P1.9.4 延期、Stage B 与两类空生产 allowlist 独立保留，不追加重复注销义务。
+
+已新增 Platform.Windows `Lifecycle` 独立 STA 隐藏窗口及控制台退出入口；Program 在 Restore 前创建，Runtime Stop 之后释放，不占用 Surface 销毁线程。查询消息立即返回 TRUE，取消结束不退出；确认结束、普通 Close、控制台关闭和卸载共享同一 Stop。Native callback 最多等待 4 秒，不阻止 Windows 关机；超时记录 TimedOut，不承诺系统会给足普通 retirement 预算。`HostProcessLifetime` 在 Runtime 清理后原子保存 `host-exit-receipt.json` 再完成共享退出任务；文件不含令牌、Pipe、HWND/PID，不修改配置或 Renderer Schema。缺失回执不能视为通过，回执存在也不能倒推已在 OS 强制终止期限内完成。
+
+隔离 Release 正式 Host 的五项受控进程样本全部通过：Close、Query→取消→Close、shutdown/logoff/close-app 标志的确认消息。只发送给本轮启动且 PID 匹配的生命周期窗口，不广播；独立 installation scope 与项目 artifacts 配置目录，预置离线 Assignment，零壁纸 Surface。五次均退出码 0、自有窗口 0、Assignment 保留、退出回执匹配、无强制清理。最终证据：`artifacts/diagnostics/host-exit/batch-a18fa720d7db44248dcf196b91d95d3c/summary.json`。**分类为 `ControlledProcessGatePassed`，绝不是实际 Windows 注销/关机通过。**
+
+`--renderer-exit-process-check` 在任何 Shell/显示器采样前执行，正式 Provider 启动真实 RendererChildProbe、完成 Hello/Initialize，分别验证 Shutdown/ShutdownCompleted 与 ForcedDispose；不发送 Attach/Load，所以没有 child HWND、DComp 或可见色块。两项均确认真实进程退出和句柄释放；ForcedDispose 的 ShutdownCompleted=False 被保留，不伪装优雅退休。证据位于 `artifacts/diagnostics/renderer-exit-process-check-20261023.json`。
+
+原始失败样本保留：首轮驱动使用超长 installation scope，现已修正且 Program 在参数解析时拒绝非法 scope；后续正式 Host 已 Running 但生命周期标题不可达，定位为 Unicode CreateWindowEx 与 ANSI DefWindowProc 混用，改为 DefWindowProcW 并加入完整标题回归。这些旧失败不是当前五项通过样本，也不删除或回写为成功。
+
+活动桌面入口 `--raised-desktop-host-exit-check --target-display primary --duration-seconds 5 --result-json <path>` 已编译，等待人工许可后运行：正式 Runtime/Renderer/Surface 提交橙色，计时后只向 LiveWall 自有生命周期窗口投递 Close，经共享 Stop 检查正常退休、真实 Renderer 退出、Surface/窗口与 Shell WorkerW 清理。不会注销或重启 Explorer。真实注销样本须先保存工作，经用户确认启动独立观察进程，再由用户手动注销/重登录；缺少 OS 实际通知样本或回执时继续保留未验收状态。两类生产 allowlist、Renderer v1/DTO/Schema 和 Stage B 不变。
+
+#### 活动 Surface 首次 Close 样本与诊断竞态（2026-10-23）
+
+经用户授权，在 `26200.9711 / session=8 / WinSta0\Default / 单屏 2880×1800 / 200%` 执行一次 5 秒活动退出检查。原始证据 `artifacts/diagnostics/active-host-exit-20261023-223042.json` 保留为 `ProductFailure`（退出码 7），不回写成功。1 个 Session 正常完成 Shutdown/ShutdownCompleted、Renderer Dispose 和 Surface cleanup，真实 Renderer 已退出且句柄释放；无自有窗口、无新增 WorkerW，Shell 保持稳定。用户随后确认“确实全程正常”：橙色显示及退出、图标/任务栏/普通窗口层级和原壁纸恢复的人工观察通过。该确认不替代失败的退出原因/回执校验，也不视为修复后可见重跑或真实注销的授权。
+
+失败项是 `exitReason=DuplicateAfterNativeClose / receiptVerified=False`：诊断回调在登记原生 WindowClose 停止任务前就通知等待者，等待者发起的重复请求可能抢先成为退出原因。现改为先登记原生请求，再发布对应的共享完成任务；等待该任务并校验重复请求返回同一任务。新增回归覆盖观察到通知时原生原因已固定、重复请求不能抢占，以及退出完成必须等待回执写入。修复不改变生产会话语义、Renderer 协议或 allowlist；修复后的可见实验仍须单独获准重跑，本次不能关闭活动 Surface 验收。
+
+修复后 Debug/Release 全量均为 **379/379**（Domain 12、Application 233、Renderer Contracts 22、Package 21、Windows 91）；Release 诊断工具构建零警告/错误，架构边界与差异检查通过。上文 `378/378` 为首次活动样本之前的历史基线。
+
+#### 活动 Surface Close 修复后复测（2026-10-23）
+
+用户确认首次视觉全程正常并明确允许重跑后，在同一 `26200.9711 / WinSta0\Default / 2880×1800 / 200%` 单屏环境完成一次 5 秒复测。证据 `artifacts/diagnostics/active-host-exit-retest-20261023-223803.json` 为 `ValidSuccess`，退出码 0：`nativeCloseObserved=True / exitReason=WindowClose / nativeWaitOutcome=Completed / receiptVerified=True`；1 个 Session 的 retirement 为 28.6941 ms，Shutdown、ShutdownCompleted、Renderer Dispose、Surface cleanup 全部成功，issues 为空。真实 Renderer 退出及句柄释放已确认，自有窗口为零、新增 WorkerW 为零，Shell 稳定。
+
+该复测的自动验收通过；用户随后确认“和上次一样正常”，本轮橙色约 5 秒、图标/任务栏/普通窗口层级及原壁纸恢复的人工观察通过，**单屏活动 Surface 正常 Close 退出验收关闭**。首轮退出码 7 及其原始记录继续保留。该项只验证 LiveWall 自有窗口 Close，不是实际 Windows 注销/关机，也不修改 Stage B 或生产 allowlist；后者仍需独立授权及真实 OS 事件证据。本次确认不授权工具注销、关机或重启 Explorer。
+
+#### 真实手动注销观察已准备（2026-10-23）
+
+用户同意开始真实会话结束实验后，通过 `tools/run-host-session-end.ps1 -Mode Arm` 在 `26200.9711 / session=8 / WinSta0\Default` 启动一个独立 Release 正式 Host，检查到 `HOST_RUNNING`、本轮观察进程恰为 1、stderr 为空且尚无退出回执。专用证据目录为 `artifacts/diagnostics/host-session-end/run-cda178f4bff24080ac1ebd19154be50f`，当前仅为 `ArmedAwaitingManualLogoff`，不是注销通过。
+
+本轮不创建壁纸 Surface/Renderer、不覆盖用户配置、不主动调用注销/关机、不注册自动启动；独立配置预置一个离线 Assignment。由用户保存工作后手动“注销”并重新登录，再执行 `tools/run-host-session-end.ps1 -Mode Verify -RunDirectory <上述绝对目录>`，核对真实 SessionLogoff 回执、Stopped/Cleanup、HOST_STOPPED、Assignment 与播放策略保存。缺失回执或退出日志只能记未完成/失败，不能靠新登录清空旧进程的事实推定应用优雅清理通过。只锁屏/睡眠不算样本；工具不设置操作倒计时，用户可从容保存工作。
+
+#### 真实手动注销首样本：清理回执通过、退出尾声未证实（2026-10-23）
+
+用户确认通过开始菜单用户头像下的“注销”完成注销并重新登录，而非锁屏。核验上述唯一目录得到 `verification.json: IncompleteOrFailed`（脚本退出码 1）。真实回执于本地时间 `2026-10-23 22:45:55 +08:00` 写入，`reason=SessionLogoff / runtimeStopped=True / cleanupSucceeded=True / failureType=null`，时间位于本轮 armed 之后；完整离线 Assignment 与播放策略文件保存通过，stderr 为空。stdout 只有 `HOST_RUNNING`，缺少 `HOST_STOPPED ... windowWait=Completed ... exitCode=0`，因此 `processExitLogged=False`。真实通知、Runtime 清理及配置保留有正面证据，但不能推断 Main 最后阶段、native wait 结果或进程退出码已证实，整体不改判通过。
+
+微软 `WM_ENDSESSION` 文档规定会话可在应用处理该消息并返回之后随时结束，控制台文档也说明系统结束期间控制台函数可能不可靠；因此 stdout 尾行不应成为今后唯一的系统退出尾声观测点。当前缺失与该时序相容，但尚不能证明其具体原因，不能据此排除末段退出未完成或宣称 Windows 已造成日志丢失。下一步应先设计并验证回调返回前的有界持久确认，与 Runtime 清理回执分层，再讨论后续实机补测；不删除或放宽本次预先冻结的失败条件，不自动再次注销。参考：https://learn.microsoft.com/en-us/windows/win32/shutdown/wm-endsession 、https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler 。
+
+本样本不创建活动 Surface/Renderer，不能与正常 Close 色块结果合并宣称“携带活动 Renderer 的 OS 强制结束”已验收。此次仅核验并记录，不修改生命周期代码、验证脚本、协议、生产 allowlist 或 Stage B 状态，不启动任何新实验。
+
+#### P1.9.5-D 原生回调分层持久观测（2026-10-23）
+
+按用户同意补足代码，Platform 的独立退出监视器新增可选强类型 observation writer，Host 在真实 Program 装配；仍不把 IPC、Assignment 或文件存储下放到 Platform。先等待共享 Runtime Stop（含 `host-exit-receipt.json`），再在原生处理路径记录 cleanup outcome，并原子写入单独的 `host-native-exit-receipt.json`。两个文件用 Host 本轮 runId 关联，不保存 HWND/PID/令牌。整体仍是同一个最多 4 秒预算，预留最多 500 ms（小预算为四分之一）给观测写入；清理超时不取消共享 Runtime 清理，写入等待过期只取消该写入。同步阻塞的回调在工作线程执行，不能卡住原生线程；任意更晚的重复通知不重启预算、不重写第一原因、不重复写入，也不把首次超时改成 Completed。AtomicFileWriter 在提交前再检查取消；不保证能强制中断不合作的存储/回调或任意底层 I/O。
+
+新文件的阶段明确为 `NativeCallbackCleanupObserved`：证明本轮 native 处理路径观察到的清理状态及持久证据，不是 Main 返回、native callback 已经返回或实际 OS 退出码的证明。记录中 `CallbackReturnObserved=False / ProcessExitObserved=False`；文件无法独立证明它自身写完之后的执行时序。生产 Program 若观察到 native 整体等待 Failed/TimedOut，正常收尾时仍返回非零，不伪装正常退出。
+
+此为**前瞻式证据契约 v2**，不是追改上次 stdout 门禁：新的 Arm manifest 标注 `nativeExitEvidenceVersion=1` 并保存 Host executable SHA256；Verify 校验同一 runId、原因、阶段、时间/预算、Runtime 状态、配置及完整 native 文件，输出 `verification-v2.json / SessionLogoffCallbackEvidenceValidated`。该分类只代表 callback 清理证据，`processExitCodeObserved` 仍独立报告，不能暗示已观察整个进程优雅返回。旧 manifest 继续执行原 stdout 门禁，首个真实样本仍为 `IncompleteOrFailed`；未知版本拒绝降级。真实新样本必须再次获得用户许可，本轮未 Arm 或注销。
+
+验证完成：Debug/Release 全量均 **394/394**，新增 15 项门禁覆盖写入顺序、同步/异步失败、写入阻塞/超时、共享清理不中断、并发通知、首次原因/超时锁定、Host 双回执关联与取消提交。`tools/test-host-session-end-evidence.ps1` 的 **13/13** 合成证据门禁通过，包括 v2 无 stdout 尾行但双回执有效、旧样本仍失败、缺失/错配/超时/错误状态/未知版本拒绝；证据位于 `artifacts/diagnostics/host-session-end/fixtures-61b540297a3d4739b547a843bad85e6a/summary.json`。五项受控正式 Host 进程 **5/5** 通过，每项双回执关联、真实退出码 0、Assignment 保留、自有窗口为零且无强制清理；证据位于 `artifacts/diagnostics/host-exit/batch-bcfdde3e28b840b8ad297229c6b40da7/summary.json`。它们仍是受控消息，不是 OS 实际注销通过。Renderer v1、DTO/Schema、Stage B 和两个生产 allowlist 不变。
+
+#### 双回执真实注销补测已就绪（2026-10-23）
+
+用户再次同意继续后，已启动新的独立 Release 正式 Host，证据目录 `artifacts/diagnostics/host-session-end/run-1a8d73f998984bb5baf8eeed0d7332e8`。运行上下文为 `26200.9711 / session=9 / WinSta0\Default`，manifest 标注 `nativeExitEvidenceVersion=1`；已复核 `HOST_RUNNING`、stderr 为空、匹配本轮目录的观察进程恰为 1、Runtime 与 native 两份退出回执均尚不存在。状态仍为 `ArmedAwaitingManualLogoff`，不是通过；只等待用户保存工作后通过开始菜单用户菜单手动注销并重新登录，不显示色块、不注册自动启动或主动结束会话。
+
+重新登录后使用 `tools/run-host-session-end.ps1 -Mode Verify -RunDirectory E:\project_c\dynamic_wallpaper\artifacts\diagnostics\host-session-end\run-1a8d73f998984bb5baf8eeed0d7332e8` 核对本轮 v2 双回执和配置，结果写入本轮 `verification-v2.json`。旧样本 `run-cda178f4bff24080ac1ebd19154be50f/verification.json` 原始 SHA256 仍为 `015E39D8577EA898C8D8DAE0C95626DDF86B3218F221273C85416CE116C5771B`，未改写。两个样本不得混用，也不能用会话重建后的进程消失推断 graceful exit。
+
+#### 双回执真实注销清理代表场景通过（2026-10-23）
+
+用户确认已经注销后重新登录，第三方动态壁纸在登录后自启动且已由用户关停。只读核验本轮 `run-1a8d73f998984bb5baf8eeed0d7332e8` 得到 `verification-v2.json: SessionLogoffCallbackEvidenceValidated`，**核验脚本退出码 0**。这是核验脚本的退出码，绝不是本轮 Host 实际进程退出码。
+
+真实 Runtime 回执于本地时间 `2026-10-23 23:14:13.947 +08:00` 写入，native 回执于 `23:14:13.958 +08:00` 写入；两者 Host runId 一致，均与本轮时间范围匹配，原因/stop reason 为 `SessionLogoff`。native phase=`NativeCallbackCleanupObserved`、cleanup outcome=`Completed`、elapsed=`81.416 ms`、总预算=`4000 ms`，RuntimeStopped/CleanupSucceeded 均为 True，failureType 为 null。完整离线 Assignment、播放策略保存与空 stderr 通过。stdout 仍只有 HOST_RUNNING，`processExitLogged=False / processExitCodeObserved=False / callbackReturnObserved=False` 如实保留；本轮是在事先冻结的 v2 callback 清理证据范围内通过，不是把缺少尾行解释成 Host 退出码 0。
+
+**该无活动 Surface/Renderer 的真实注销清理代表场景关闭，无需为同一目标继续重复注销。** 登录后第三方自启动不使已经落盘的本轮回执失效；本轮不涉及桌面附着或竞争壁纸恢复，不能据此宣称竞争矩阵通过。旧样本 `run-cda178f4bff24080ac1ebd19154be50f/verification.json` 的原始 SHA256 仍为 `015E39D8577EA898C8D8DAE0C95626DDF86B3218F221273C85416CE116C5771B`，未改写且仍不完整。自动基线仍为 394/394，本轮只核验真实文件并更新状态，没有重新运行全量测试或启动新的 Host/色块。
+
+以上为 D 阶段当时边界；其后 E 节活动 Renderer 单屏真实注销也已通过，P1.9.5 按明示条件关闭。不扩展为任意强制终止、真实关机/重启、双屏退出或所有异常矩阵已经实机通过。那些若作为产品接受项，必须明确另行规划和授权。P1.9.2 双屏系统恢复及 P1.9.4 实机延期义务、Stage B `In progress / Not accepted`、Renderer v1/DTO/Schema 与两类空生产 allowlist 不变。
+
+#### P1.9.5-E 最后关闭项：活动 Renderer 的真实注销（2026-10-23）
+
+针对用户要求先完成 P1.9.5，冻结下列切片关闭条件，不再用“完整生产矩阵”这个无边界表述把已完成子项无限延期：
+
+| 关闭项 | 当前证据 | 状态 |
+|---|---|---|
+| Attach/Load/FirstFrame/Replace、recovery/reconciliation/retry 与退休期间停止、迟到完成、重复退出、配置保留 | 受控状态机与资源所有权自动门禁 | 通过 |
+| 原生窗口/控制台通知、共享 Stop、最多 4 秒及分层持久观测 | Debug/Release 自动与原生自有窗口门禁 | 通过 |
+| 正式 Host 与 Renderer 进程级退出 | 五项 Host 受控进程与 Renderer 优雅/强制退出 | 通过 |
+| 单屏活动 Surface 正常 Close | `active-host-exit-retest-20261023-223803.json`，自动及人工确认 | 通过 |
+| 无活动 Renderer 的真实 SessionLogoff | `run-1a8d73f998984bb5baf8eeed0d7332e8/verification-v2.json` | 通过 |
+| 活动 Renderer 正在呈现时的单屏真实 SessionLogoff | `run-7b157be0a83247e5a5af4a323858dda0/verification-v3.json`，真实 ShutdownCompleted、Renderer ExitCode=0、Surface=0、双回执/配置保留及人工确认；首轮失败保留 | 通过 |
+
+以上六项已全部通过，P1.9.5 于 2026-10-24 按明示边界关闭；它不宣称任意第三方组件、强杀、真实关机/重启或所有双屏物理组合均已验收。P1.9.2/P1.9.4 的双屏延期和 Stage B 其他门禁仍独立保留，不能转嫁成 P1.9.5 新增的重复注销义务。OS 回调之后的 Main 返回和实际 Host 退出码不是能由回调内文件自证的事实，仍保持未观察，而不是追加无法保证的 stdout 尾声要求。本文随后各项“就绪/待重测”是当时记录，以最后真实重测结果为准。
+
+已实现 `DesktopHostDiagnostics --raised-desktop-host-session-end --run-directory <fresh-dir>`，由 `tools/run-host-session-end.ps1 -Mode Arm -WithActiveRenderer` 显式启动。仅诊断组合根注入合成内容和实验 Raised，生产 Program 不接收新开关，allowlist 不变；复用正式 Runtime、事件桥、SessionCoordinator、Surface Factory 和 Renderer Protocol v1。只选一次当前主屏、创建一个 Session/Surface，首帧及一次 Replace 完成后落盘 `active-ready.json` 并报告 ready。启动预算来自 Host 实际 Apply budget，而非另一个固定 15/20 秒；人工注销等待独立为最多十分钟，超时只清理自有资源、不触发 OS 注销。旧配置或已有本轮证据拒绝覆盖。
+
+native 观测写入路径在同一个 4 秒预算内，先持久化 `active-exit-evidence.json`，再写 native 回执。前者关联同一 Host runId，包含首帧提交 generation、预期 SessionId 集合、逐 Session Shutdown/ShutdownCompleted/Dispose/Surface cleanup，以及真实 Renderer process exit/handle disposal；不记录 HWND/PID/认证令牌/Pipe。新 manifest 才标记 `activeSessionEvidenceVersion=1`；Verify 除 Runtime/native 双回执、配置外，还独立检查非空唯一 Session、generation、完整且不重复的退休与进程证据、自有 Surface 为零，写 `verification-v3.json / ActiveRendererSessionLogoffEvidenceValidated`。不能以 v2 无 Renderer 的记录替代 v3，也不能只相信文件里的 Valid 布尔值。
+
+本轮新增 **23** 项 C# 证据/参数门禁，Debug/Release 基线 **417/417**；合成证据扩展为 **25/25**，覆盖活动记录缺失、旧 runId/generation、ShutdownCompleted 缺失、进程/句柄未释放、残留 Surface、重复退休及缺少 native 回执。最终合成证据：`artifacts/diagnostics/host-session-end/fixtures-b1b5a2f2ecf844189f0ed0f80ae55953/summary.json`；五项无 Surface 正式 Host 回归 **5/5**：`artifacts/diagnostics/host-exit/batch-093cb62169f14a8883fd255a6235a1fc/summary.json`。首轮合成内容全部符合预期，但驱动继承了最后一个预期失败子进程的 LASTEXITCODE，已在驱动成功末尾显式 exit 0，未更改产品失败条件。真实活动注销仍未执行，不能提前标为完成。
+
+最终源码复核还捕获一次测试稳定性失败：既有 `CallbackFailuresCannotEscapeWndProcOrRestartCleanup(False)` 用 50 ms 测试普通异常传播，但引入工作线程调度后负载可能先耗尽该测试预算，得到 TimedOut 而非预期 Failed。已把非超时用例预算明确调整为 1 秒，真实超时用例仍保留短预算，生产 4 秒与独立退休预算均未更改。修正后重新执行 Debug/Release 全量均 **417/417**，Release 工具零警告/错误，边界和差异检查通过；并非原样重跑掩盖失败。最终补强后合成证据仍 **25/25**：`artifacts/diagnostics/host-session-end/fixtures-914eef43b1e940a9a1d9ba31f523ddaa/summary.json`。旧真实失败样本原始 hash 保持不变，本轮没有启动新色块或注销。
+
+#### 最后活动 Renderer 注销实验已就绪（2026-10-24）
+
+用户明确同意后，已执行 `tools/run-host-session-end.ps1 -Mode Arm -WithActiveRenderer`，本轮唯一证据目录为 `artifacts/diagnostics/host-session-end/run-d654e00982c9497ea201a3f2443618aa`。环境为 `26200.9711 / session=10 / WinSta0\Default`；`active-ready.json` 确认 generation=1、1 个活动 Surface、FirstFrameCommitted=True、预期 SessionId 为 `2a0fb7951ca24613b205e381b9f4391d`。再次只读检查确认本轮诊断进程与其 Renderer 子进程各 1 个、stderr 为空，Runtime/native 回执与 active-exit-evidence 均尚不存在，状态只是 `ArmedAwaitingManualLogoff`，不是验收通过。
+
+主屏橙色保持等待用户手动注销（最多十分钟）；工具不主动注销、重启 Explorer 或改显示设置。重新登录后只需执行 `tools/run-host-session-end.ps1 -Mode Verify -RunDirectory E:\project_c\dynamic_wallpaper\artifacts\diagnostics\host-session-end\run-d654e00982c9497ea201a3f2443618aa`，核对 `verification-v3.json`、双回执、逐 Session 退休/真实 Renderer 退出/Surface 清理及 Assignment 保留。若橙色因等待超时自行消失，不把该轮当作实际注销通过，应先核对其终态再决定下一步。
+
+#### 首个活动 Renderer 真实注销失败与退出顺序修正（2026-10-24）
+
+用户确认已注销/重新登录，注销前画面正常，登录后被第三方壁纸接管。核验 `run-d654e00982c9497ea201a3f2443618aa/verification-v3.json` 为 `IncompleteOrFailed`，核验脚本退出码 1：Runtime/native 回执均是实际 `SessionLogoff`，RuntimeStopped/CleanupSucceeded、Assignment、播放策略、空 stderr 全部通过；native elapsed=87.8712 ms，未超时。原提交 Session `2a0fb7951ca24613b205e381b9f4391d` 的退休 elapsed=31.7882 ms，ShutdownSent=True 但 ShutdownCompleted=False，issue=`ShutdownFailed: Renderer failed during shutdown: renderer.process.exited.`。Renderer 实际退出/句柄释放、Surface 清理及 OwnedSurfaceCount=0 均通过，然而 Graceful=False / active evidence Valid=False，**严格保持失败，不以资源已清理替代协议回执**。原始核验文件 SHA256=`0B672B072CAED77898EEFE3EB87A65040A4536C767220DECF2C4755EE285E7C1`，不改写。
+
+登录后第三方壁纸接管不能解释注销时已经落盘的缺失回执；本轮不操作第三方应用。只读查询时间窗口内的 Application 1000/1001/1026 未获得相关事件，旧证据又没有 Renderer 实际退出码，不能断定是系统按序终止、Renderer 自行失败还是其他结束时序。代码核对发现 Host/Renderer 都没有声明相对进程退出顺序，使用相同默认级别，这是一处明确的依赖缺口，与“Renderer 先于 Host 完成 Shutdown 交换而结束”的观察相容，但不是对旧样本唯一根因的证明。
+
+修正仅限当前进程：新增 Platform `WindowsProcessShutdownOrder`，正式 Host 与活动诊断 observer 使用 `0x281`，RendererChildProbe 在 Hello 前使用 `0x280`，设置后读回校验，失败不报告 ready，正常结束后恢复原参数；不使用系统保留范围、SHUTDOWN_NORETRY、全局策略、服务、注册表或 CPU 优先级。[官方定义](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocessshutdownparameters)是高 shutdown level 优先结束、各进程默认 0x280。本修正不增加原生 4 秒/退休预算，不改变 v3 必须有真实 ShutdownCompleted 的门禁。新 ready/manifest 记录 Host/Renderer 级别；tracker 增加 Renderer 实际 ExitCode 元数据并保留完整退出错误，进程失败消息不再包含不必要的 native PID。旧样本退出码未知，不能用修正后的数据倒推或补填。
+
+修正后 Debug/Release 全量均 **428/428**，新增八项纯假原生退出顺序测试、两项退出码参数样本和一项退休错误详情保留测试；测试运行器不修改自身真实退出顺序。首次全量发现新测试没有初始化 fake Coordinator，已补 CreateCommandLoop 初始化，修正后两配置全部通过。Release 工具零警告/错误；以下非可见门禁均通过，不代替真实 OS 注销：
+
+- 受控正式 Host 进程 **5/5**：`artifacts/diagnostics/host-exit/batch-e16a8b20791b41ae912392fe60c38d01/summary.json`，各项退出码 0，无 Surface、无真实系统注销，双回执匹配、无自有窗口残留。
+- 正式测试 Renderer 无 Surface 进程 **2/2**：`artifacts/diagnostics/renderer-exit-order-20261024-002509.json`，优雅 Shutdown 有真实 ShutdownCompleted；强制 Dispose 不伪造回执；两者真实退出与句柄释放均通过，不创建 child HWND/DComp。
+- 合成证据 **25/25**：`artifacts/diagnostics/host-session-end/fixtures-7bc566fd0e7e46cb9b50843445962156/summary.json`，v3 缺少 ShutdownCompleted 等负例仍被拒绝。旧真实失败核验文件 hash 保持不变，未通过修改证据或放宽校验取得通过。
+
+修正完成时，P1.9.5 最后一项仍为失败后待独立授权重测，没有提前关闭，也未新增别的关闭项。当时第三方接管桌面，未经用户关停确认与可见实验许可，没有启动新 Surface、注销或修改第三方启动项；此前无 Renderer 的 v2 通过及旧样本原分类不变。后续授权重测见下文。
+
+#### 退出顺序修正后的活动注销重测已就绪（2026-10-24）
+
+用户确认第三方壁纸完全退出并明确同意重测，已执行 `tools/run-host-session-end.ps1 -Mode Arm -WithActiveRenderer`，新目录为 `artifacts/diagnostics/host-session-end/run-7b157be0a83247e5a5af4a323858dda0`。当前 `26200.9711 / session=11 / WinSta0\Default`、物理单屏 `2880×1800 / 200%`；generation=1、1 个活动 Surface、FirstFrameCommitted=True，SessionId=`3b5af1204d5c4115b666050f28507c4c`。ready/manifest 已核对 HostShutdownLevel=641（0x281）、RendererShutdownLevel=640（0x280）；Host 观察器与 Renderer 子进程各 1 个且同会话，stderr 为空，尚无退出回执。状态仅为 `ArmedAwaitingManualLogoff`，不能提前判通过。
+
+主屏橙色保持等待用户手动注销，最长十分钟，无自动注销、Explorer 重启或启动项修改。重新登录后使用本轮完整目录运行 `tools/run-host-session-end.ps1 -Mode Verify -RunDirectory <本轮目录>`，重点确认真实 ShutdownCompleted、Renderer 实际退出码及句柄释放、Surface 为零、双回执和 Assignment 保留；旧失败目录不改写。若等待超时自动清理，不把超时结束视为实际注销通过。
+
+#### 活动 Renderer 真实注销重测通过，P1.9.5 关闭（2026-10-24）
+
+用户确认“注销前正常，登陆后是原壁纸”。对本轮独立目录 `artifacts/diagnostics/host-session-end/run-7b157be0a83247e5a5af4a323858dda0` 执行 Verify，脚本退出码 0，`verification-v3.json` 分类为 `ActiveRendererSessionLogoffEvidenceValidated`。这是实际手动 SessionLogoff，不是受控消息注入；工具未主动注销、重启 Explorer 或注册自启动。环境证据对应 `26200.9711 / 原 session=11 / WinSta0\Default`、物理单屏 `2880×1800 / 200%`，不将旧 build 或双屏样本泛化为本轮通过。
+
+Runtime/native 回执 runId 同为 `5c939d96fe05485dbbb0039b51586346`、reason=SessionLogoff，RuntimeStopped/CleanupSucceeded=True；native elapsed=**72.4434 ms**、budget=4000 ms，cleanupOutcome=Completed。generation=1、原提交 Session `3b5af1204d5c4115b666050f28507c4c` 的 retirement elapsed=**30.722 ms**，ShutdownSent/ShutdownCompleted/RendererDisposed/SurfacesCleaned/Graceful/OwnedResourcesCleaned 全部 True、issues 为空；Renderer 实际退出已观察、ExitCode=**0**、句柄已释放；最终 OwnedSurfaceCount=**0**、active evidence Valid=True。Assignment 保留、策略已保存、stderr 为空。登录后只读进程检查也未发现 LiveWall.Host、DesktopHostDiagnostics 或 RendererChildProbe 残留。
+
+本轮核验文件 SHA256=`552D7FDEB155769020B60ACFB70CB76A0FD33AFFAEA6F22DAFAD893E78CD13EB`。首个活动失败文件仍为 `0B672B072CAED77898EEFE3EB87A65040A4536C767220DECF2C4755EE285E7C1`，更早 stdout-only 不完整样本仍为 `015E39D8577EA898C8D8DAE0C95626DDF86B3218F221273C85416CE116C5771B`，均未改写或重新解释。一次修正后成功证明本轮退出链成立，不能倒推首轮失败的唯一根因，也不是长期成功率声明。
+
+实际 **Host** 退出码、Main 返回与 native callback 返回仍未观察，`processExitLogged/processExitCodeObserved/callbackReturnObserved=False` 按证据范围保留；上文 Renderer ExitCode=0 和核验脚本退出码 0 不与其混淆。登录后的原壁纸符合本诊断不注册自启动的行为，不构成产品自动启动/Assignment 跨登录自动呈现验收。按 E 节有限关闭表，**P1.9.5 代码、自动/受控门禁及代表性实机项全部完成，正式关闭，不再追加重复注销。** P1.9.2 双屏系统恢复、P1.9.4 真实 Shell/display 并发及双屏延期、生产内容入口与 Shell mutation 策略仍独立保留；Stage B 继续 `In progress / Not accepted`，Renderer Protocol v1/DTO/Schema 和两类空生产 allowlist 不变。本轮仅核验、同步状态与检查文档差异，未启动新的色块或系统操作。
+
+### P1.9.5-A 退出事务与等待者安全（2026-10-23）
+
+本轮完成代码及自动门禁，不操作真实桌面。Shutdown 入队即发出停止取消信号，Host 单写者进入 Stopping 并终态化 Apply/recovery/reconciliation；普通 Apply、拓扑 Replace 和恢复 Replace 关联停止取消，尚未执行的 Replace 不再提交。已经发生的原生窗口操作不能承诺回滚或被抢占，随后仍必须按停止路径清理，不能声称 Windows 物理显示层具有强事务撤销。
+
+`HostCommandLoop.DisposeAsync` 共享一个完成任务：先取消准备和重试，保持内部通道开放，等待所有准备/恢复/策略后台生产者完成转交；通过单写者队列屏障处理迟到批次，随后完成通道并排空所有排队调用者，最后等待独立 Session retirement，才释放 operation/CTS。停止后仍可返回幂等 Shutdown/状态快照；通道关闭后变更命令明确返回 `host.stopped`、TryPost 返回 false。清理错误进入有界失败记录，Dispose 不伪装成功；ShutdownTimeout 但最终自有资源已清理时仍保留独立退休问题，不回滚新会话。
+
+正在 reattach 的 recovery 是旧/新 Surface 与共享 Renderer 的清理所有者，Shutdown 不再同时普通退休同一个 Renderer；恢复第一步拓扑采样失败或取消也进入整批 abandon。Runtime 的 Stop 共享任务不受单个调用者取消等待影响；配置读取/Assignment 恢复阶段的 Stop 取消启动，迟到启动不能重启已释放的事件桥或复活 Running，初始化未完成不覆写原配置文件。
+
+新增 **20** 个受控样本：Attach/Load/FirstFrame/Replace 退出；迟到 Apply/reconciliation/reattach/rebuild；恢复/拓扑退避退出；三种恢复 Replace 取消；恢复初始拓扑查询取消；重复 Shutdown/Dispose 和旧 Renderer 退休超时；迟到事件、40 个排队调用者全部终结；取消 Runtime Stop 等待；启动/退出交错；故意清理失败仍可观察。正常样本逐一检查 Renderer 与 Surface 只清理一次，失败注入样本保留真实失败而非宣称零残留。
+
+当时 Debug/Release 均 **354/354**（Domain 12、Application 221、Renderer Contracts 22、Package 21、Windows 78），Release 工具零警告/错误，架构边界与差异检查通过。**P1.9.5-A 代码及自动门禁完成；P1.9.5 整体未接受。** 其后 B/C 已补齐系统通知接线及受控真实进程样本，实际 OS 会话结束与活动桌面观察仍待确认。合作组件使用既有阶段/退休预算，不能据此保证任意不响应取消的第三方组件也能有界退出。未启动色块、改变显示器或重启 Explorer，协议、Schema、两个生产 allowlist 和 Stage B 状态不变。
+
 ### P1.9.4-A Shell 抢占未提交准备（2026-10-11）
 
 确认 Shell generation 改变后，Host 立即取消尚未终态的 Apply preparation，并将进行中的拓扑 reconciliation 终态化为 `Cancelled/Superseded`；Shell 恢复使用最新已接受拓扑。自动覆盖普通 Apply 和拓扑准备已经完成 FirstFrame、内部完成尚未投递时的抢占：取消终态立即可等待；恢复完成后迟到 provisional 结果只能清理，不能 Replace 或改变已提交 Session/Assignment。
@@ -60,6 +401,16 @@
 此项只是 P1.9.4 的第一条自动边界，不等价于完整环境恢复仲裁。反向顺序（Shell 恢复中接受新 topology revision）、NoChange/Suspend 抢占、旧恢复终态与新事务隔离、恢复期重复信号及真实并发实验仍待收口。未执行 Explorer 或显示变化实机实验。
 
 本次 Debug/Release 全量自动基线 `279/279`（新增两条受控的 FirstFrame 后迟到结果测试），Release 诊断工具构建及架构边界检查通过；不修改 Renderer Protocol v1、DTO/Schema 或生产 allowlist。
+
+### P1.9.4 自动证据收口（2026-10-23）
+
+按当前没有外接显示器的条件，只推进代码和受控自动门禁，不执行色块、显示设置变化或 Explorer 重启。已用强类型 `DisplayReconciliationSupersessionCause` 区分 `ShellGenerationChanged` 与 `NewerTopology`，并发证据不再依赖日志文本。
+
+诊断入口与自动测试现在共用同一个纯证据校验器，输出 `ValidationIssues`：逐个已发布 revision 必须恰有一个终态；最终显示器、Session 和 Surface ordinal 必须一一对应、bounds 精确匹配；每个最终 Surface 必须恰有一条当前 generation 的成功首帧且位于唯一 Replace 之前；每个活动 Session 的退休和 Renderer 实际退出必须有对应记录。重复显示器、漏屏、旧 generation 首帧/退休、重复首帧、提交后首帧、缺失退出和空集合不能靠 `All()` 或总数量蒙混通过。无重叠/未观察到最终 revision 仍为 `EnvironmentInconclusive`；采集丢失为 `HarnessFailure`；产品不变量冲突为 `ProductFailure`。
+
+整批 Rebuild 现在将真实 Apply preparation journal 中的逐 Surface `SurfaceAttached/FirstFramePresented` 在 Replace 前纳入 recovery journal，注明来源；这些条目表示 Host 收集到的准备证据，不冒充原始事件的独立性能时钟。新增受控双屏 `2→1→0→最终双屏/零屏` 交错，证明中间 revision 立即取消、仅最新布局一次提交或 Suspend、无 stale Shell resize、无多余 Renderer、离线 Assignment 保留。Suspend 保留已放弃 reattach 的历史首帧，但没有 Replace；不能把历史首帧误算成当前可见提交。
+
+本轮新增 **32** 条自动样本，当时 Debug/Release 全量均 **334/334**（Domain 12、Application 201、Renderer Contracts 22、Package 21、Windows 78）。Release 工具零警告/错误，架构边界和差异检查通过。**P1.9.4 开发切片关闭；C 的真实并发、双屏层级和资源/Shell 清理实机证据为 `Deferred / Pending hardware`，生产验收门禁仍待关闭。** 暂不因无外接屏反复启动人工实验；不阻塞 P1.9.5 退出竞态代码。Renderer v1、DTO/Schema、默认产品入口、两个生产 allowlist 和 Stage B 状态不变。
 
 ### P1.9.4-C 显式并发诊断入口（2026-10-11）
 

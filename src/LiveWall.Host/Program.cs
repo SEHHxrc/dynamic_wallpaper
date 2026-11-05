@@ -1,6 +1,9 @@
 using System.Runtime.Loader;
 using LiveWall.Host.Bootstrap;
 using LiveWall.Infrastructure.Ipc;
+using LiveWall.Platform.Windows.Lifecycle;
+using LiveWall.Contracts.Ipc;
+using LiveWall.Infrastructure.FileSystem;
 
 namespace LiveWall.Host;
 
@@ -25,20 +28,43 @@ internal static class Program
             return 2;
         }
 
-        using CancellationTokenSource lifetime = new();
+        return RunHost(options);
+    }
+
+    private static int RunHost(HostProgramOptions options)
+    {
+        WindowsHostRuntime? runtime = null;
+        HostProcessLifetime? lifetime = null;
+        WindowsProcessExitMonitor? exitMonitor = null;
+        WindowsProcessShutdownOrder? shutdownOrder = null;
+        int exitCode = 1;
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
         {
             eventArgs.Cancel = true;
-            lifetime.Cancel();
+            _ = lifetime?.RequestStop("ConsoleCancel");
         };
-        Action<AssemblyLoadContext> unloadingHandler = _ => lifetime.Cancel();
+        Action<AssemblyLoadContext> unloadingHandler = _ =>
+        {
+            try { lifetime?.RequestStop("ProcessUnloading").Wait(TimeSpan.FromSeconds(4)); }
+            catch (Exception) { /* No exception may escape a native process-exit callback. */ }
+        };
         Console.CancelKeyPress += cancelHandler;
         AssemblyLoadContext.Default.Unloading += unloadingHandler;
         try
         {
-            WindowsHostRuntime runtime = WindowsHostCompositionRoot.Create(
+            shutdownOrder = WindowsProcessShutdownOrder.ForHost();
+            runtime = WindowsHostCompositionRoot.Create(
                 options.ConfigurationDirectory);
+            lifetime = new HostProcessLifetime(runtime, receipt => AtomicFileWriter.WriteJsonAsync(
+                Path.Combine(options.ConfigurationDirectory, "host-exit-receipt.json"), receipt),
+                (receipt, token) => AtomicFileWriter.WriteJsonAsync(
+                    Path.Combine(options.ConfigurationDirectory, "host-native-exit-receipt.json"), receipt, cancellationToken: token));
+            exitMonitor = new WindowsProcessExitMonitor(lifetime.RequestStop,
+                persistObservationAsync: lifetime.PersistNativeObservationAsync);
+            exitMonitor.Ready.GetAwaiter().GetResult();
             runtime.StartAsync(lifetime.Token).GetAwaiter().GetResult();
+            if (!lifetime.IsStopRequested) exitMonitor.MarkRunning();
+            Console.WriteLine("HOST_RUNNING");
             if (options.ValidateStartupOnly)
             {
                 runtime.StopAsync(CancellationToken.None).GetAwaiter().GetResult();
@@ -47,17 +73,38 @@ internal static class Program
             {
                 runtime.RunAsync(lifetime.Token).GetAwaiter().GetResult();
             }
-            return runtime.LastFault is null ? 0 : 1;
+            exitCode = runtime.LastFault is null ? 0 : 1;
         }
-        catch
+        catch (OperationCanceledException) when (lifetime?.IsStopRequested == true)
         {
-            return 1;
+            exitCode = runtime?.LastFault is null ? 0 : 1;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"Host failed: {exception.GetType().Name}: {exception.Message}");
+            exitCode = 1;
         }
         finally
         {
             AssemblyLoadContext.Default.Unloading -= unloadingHandler;
             Console.CancelKeyPress -= cancelHandler;
+            try
+            {
+                if (lifetime is not null) lifetime.RequestStop("ProgramExit").GetAwaiter().GetResult();
+                else runtime?.StopAsync(CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (Exception) { exitCode = 1; }
+            if (runtime?.LastFault is not null) exitCode = 1;
+            try { exitMonitor?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+            catch (Exception) { exitCode = 1; }
+            if (exitMonitor?.WaitOutcome is WindowsExitWaitOutcome.Failed or WindowsExitWaitOutcome.TimedOut)
+                exitCode = 1;
+            try { shutdownOrder?.Dispose(); }
+            catch (Exception) { exitCode = 1; }
+            Console.WriteLine($"HOST_STOPPED reason={lifetime?.Reason} | windowWait={exitMonitor?.WaitOutcome} | exitCode={exitCode}");
+            lifetime?.Dispose();
         }
+        return exitCode;
     }
 }
 
@@ -92,6 +139,7 @@ internal sealed record HostProgramOptions(
             }
         }
 
+        IpcEndpointNames.ValidateInstallationScope(installationScope);
         return new HostProgramOptions(
             installationScope,
             configurationDirectory,

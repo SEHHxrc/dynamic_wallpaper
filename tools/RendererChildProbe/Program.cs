@@ -3,6 +3,7 @@ using LiveWall.Contracts.RendererProtocol;
 using LiveWall.Diagnostics;
 using LiveWall.Infrastructure.Ipc;
 using LiveWall.Platform.Windows.Desktop;
+using LiveWall.Platform.Windows.Lifecycle;
 
 namespace LiveWall.RendererChildProbe;
 
@@ -32,6 +33,7 @@ internal static class Program
         ProbeFaultPlan? faultPlan = ProbeFaultPlan.ReadAndClearFromEnvironment();
         try
         {
+            using WindowsProcessShutdownOrder shutdownOrder = WindowsProcessShutdownOrder.ForRenderer();
             await using System.IO.Pipes.NamedPipeClientStream pipe =
                 LocalNamedPipeFactory.CreateClient(pipeName);
             await pipe.ConnectAsync(timeout: 10_000).ConfigureAwait(false);

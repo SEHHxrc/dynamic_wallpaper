@@ -41,6 +41,7 @@ public static class AtomicFileWriter
                 stream.Flush(flushToDisk: true);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             Commit(temporary, destination);
         }
         finally

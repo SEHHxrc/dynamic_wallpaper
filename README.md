@@ -1,6 +1,6 @@
 # LiveWall
 
-LiveWall 是面向 Windows 10 1903+ / Windows 11 的轻量动态壁纸程序。本仓库已建立领域、应用、跨进程契约和进程边界，并已实现一组可自动验证的 Foundation 与 Windows Desktop Host 机制；这些代码尚未接入产品入口，也不表示 Stage B 已通过真实桌面兼容验收。
+LiveWall 是面向 Windows 10 1903+ / Windows 11 的轻量动态壁纸程序。本仓库已建立领域、应用、跨进程契约和进程边界，并实现 Foundation、Windows Desktop Host 与正式 Host 生命周期；Video 进程已接协议，但默认产品内容链尚未启用，不表示 Stage B 已通过真实桌面兼容验收。
 
 ## 权威文档
 
@@ -44,13 +44,17 @@ Bootstrap 还会生成被 Git 忽略的 `.vscode/settings.json`，让 C# 与 C# 
 
 ## 当前边界
 
+2026-11-03 当前进度：**C1 已按约定有限范围关闭，下一步 C2 最小持久视频仓库与正式 Host 内容恢复待启动**。C1.2 单屏正式产品候选通过，C1.3 又完成播放→暂停→同 Renderer 新容器重附着→恢复→正常退出，用户确认全部符合预期；真实 ExitCode=0、完整自有清理，本轮 WorkerW 1→1、未新增，整轮退出码 0。此前 Shell mutation 的 CleanupIncomplete 和旧失败原样保留。Debug/Release 各 **573/573**。ADR-011 vo=libmpv + D3D11 Render API、v1 HwndChild、DTO/Schema 不变；未支持的 Throttle/属性/连续遥测明确拒绝，不冒充完整 Renderer 能力。默认生产 Provider/持久库、双屏/真实 Video Explorer/长期资源及编码性能矩阵、发行待完成。依赖和运行时限定项目，P1.9.2/P1.9.4 延期、Stage B 未接受及两个空生产 allowlist 保留。详见统一台账及 Video 模块能力表。
+
+2026-10-24 最新验证：**P1.9.5 已按明示边界关闭。** 停止事务、系统通知、双层持久观测、受控进程、单屏活动 Close、无 Renderer 真实注销与最后活动 Renderer 单屏真实注销均通过。退出顺序修正后的真实样本收到 ShutdownCompleted，Renderer ExitCode=0、Surface=0，配置保留，用户确认注销前正常、登录后原壁纸。修正后自动基线为 Debug/Release `428/428`、合成证据 `25/25`、受控 Host `5/5`、无 Surface Renderer `2/2`。旧失败样本原样保留，不推断未观察到的 Main 返回或实际 Host 退出码，不泛化为真实关机/重启、双屏退出或登录自启动已验收。P1.9.2 双屏系统恢复与 P1.9.4 实机延期义务仍保留，Stage B 为 `In progress / Not accepted`，两类生产 allowlist 为空。详情见统一台账的 P1.9.5-E 关闭表和真实重测记录。
+
 当前已实现专用 STA Window Dispatcher、隐藏 provisional Surface、批量 `ReplaceSurfacesAsync`、以 `TaskbarCreated` 为主信号并按 350 ms 防抖的 Shell 失效检测，以及由 Host 驱动的 Surface 重建式恢复。`DesktopHostDiagnostics` 已提供 `--shell-topology`、Legacy `--color-block`，以及隔离的 Raised/Desktop 产品候选诊断；默认运行仍只读。双屏基础、长驻、process-cold、连续替换、正式 Renderer 局部失败关闭、Explorer 正向重附着和局部失败整批重建已经通过。P1.8 显示拓扑重规划已接入 Host 单写者，并具备 revision 终态、失败回退和 stale 准备取消；当前真实断开/重连、`2→1→2→1→2` 快速 revision 抢占、主屏切换、scale-only 及 bounds+scale 已通过。旋转后的最终几何、黄色原子替换、外接屏保留和系统层级均正确；活动 Surface 快速适配已从约 0.74 秒缩短到约 20.6 ms。P1.8-TG0 的有限预置 Guard 重复矩阵证明 DWM 会自动揭示预置内容，但横→纵样本也确认首帧可能只有部分洋红、其余仍黑，无法保证整个预测区域原子呈现。因此 TG0 按 ADR-009 关闭为“部分可行、严格目标失败”，不进入 TG1、不生产化 Guard；旋转继续保留 `TransientCoverageGap` 已知限制。
 
 P1.8.2 的自动安全边界已接线：运行中的非空拓扑只有在相隔 350 ms 的两次连续空采样后才发布零显示器 Suspend，采样失败或任意非空快照会取消空候选；进程启动即为空则形成独立的初始拓扑。Span 继续使用一个物理像素 Surface 和 `scaleFactor=1`，若其矩形包围区与任何非成员显示器相交则以强类型布局错误失败关闭，并在拓扑重规划失败时保留既有活动 Session。
 
-P1.9.1 已把 `TaskbarCreated` 的正式事件链接入真实 `WindowsHostRuntime` 并完成双屏实机验收。无 Shell 变化的 10 次 burst 只触发一次防抖验证，Host generation、Session 身份、Replace 与 retirement 均保持不变；真实 Explorer 重启则由信号/后备探针确认一次 Shell generation 变化，只形成一个 recovery operation 和一次批量 Replace。本次真实恢复按安全策略得到 `Succeeded + Rebuilt`，两屏同步经历 Shell 黑屏、恢复后重新显示橙色，未出现半屏提交、重复恢复、层级覆盖或自有 HWND 残留。P1.9.2–P1.9.5 的系统会话与并发/退出矩阵仍未完成。
+P1.9.1 已把 `TaskbarCreated` 的正式事件链接入真实 `WindowsHostRuntime` 并完成双屏实机验收。无 Shell 变化的 10 次 burst 只触发一次防抖验证，Host generation、Session 身份、Replace 与 retirement 均保持不变；真实 Explorer 重启则由信号/后备探针确认一次 Shell generation 变化，只形成一个 recovery operation 和一次批量 Replace。本次真实恢复按安全策略得到 `Succeeded + Rebuilt`，两屏同步经历 Shell 黑屏、恢复后重新显示橙色，未出现半屏提交、重复恢复、层级覆盖或自有 HWND 残留。后续系统会话与并发矩阵的延期项不因 P1.9.5 关闭而视为通过。
 
-P1.9.2 自动门禁及物理单屏代表场景已通过：基线启动/退出、锁解 3/3、用户暂停锁解 1/1、S0 Modern Standby 睡眠恢复 2/2；首个未完成睡眠样本继续保留，双屏系统恢复独立待补。P1.9.3.0 已实现当前 Session 事件过滤、断开期间的呈现提交门禁、最新环境延后处理、revision 关联的重连验证和可等待终态；P1.9.3.1 显式诊断入口已完成。首版不支持 RDP 动态壁纸呈现，RDP 实机为 `OutOfScope / WaivedForV1`，不再阻塞开发；通用会话保护保留，本地快速用户切换实机为 `NotValidated`。已进入 P1.9.4 的 Shell/display 并发恢复自动收口，完整仲裁和实机矩阵仍待完成。最新验证结果以统一台账为准；协议 v1、DTO/Schema、生产 allowlist 和 Stage B 状态不变。
+P1.9.2 自动门禁及物理单屏代表场景已通过：基线启动/退出、锁解 3/3、用户暂停锁解 1/1、S0 Modern Standby 睡眠恢复 2/2；首个未完成睡眠样本继续保留，双屏系统恢复独立待补。P1.9.3.0 已实现当前 Session 事件过滤、断开期间的呈现提交门禁、最新环境延后处理、revision 关联的重连验证和可等待终态；P1.9.3.1 显式诊断入口已完成。首版不支持 RDP 动态壁纸呈现，RDP 实机为 `OutOfScope / WaivedForV1`；通用会话保护保留，本地快速用户切换实机为 `NotValidated`。P1.9.4 开发切片关闭，真实并发与双屏实机为 `Deferred / Pending hardware`，保留测试义务但不阻塞后续开发。P1.9.5 退出事务、原生通知、受控进程与约定的单屏实机代表项均已关闭，详细证据和保留范围以统一台账为准；协议 v1、DTO/Schema、生产 allowlist 和 Stage B 状态不变。
 
 `26200.9457 / WinSta0\Default` 的双屏 refresh-only 实机样本已经通过：内置主屏从 120 Hz 改为 60 Hz 时 DisplayId、bounds、scale 和虚拟原点均不变，Host 产生 `NoChange / generation=none`，两个活动 Session 身份保持、零 retirement、零 Surface Replace，测试色和桌面层级持续正确，最终清理完整。
 

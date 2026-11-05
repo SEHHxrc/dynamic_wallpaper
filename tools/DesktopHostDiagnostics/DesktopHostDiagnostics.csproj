@@ -7,11 +7,15 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\Shared\ProbeFaultPlan.cs" Link="ProbeFaultPlan.cs" />
+    <Compile Include="..\Shared\ShellMutationAssessment.cs" Link="ShellMutationAssessment.cs" />
+    <Compile Include="..\Shared\VideoCandidateCleanupAssessment.cs" Link="VideoCandidateCleanupAssessment.cs" />
     <ProjectReference Include="..\..\src\LiveWall.Contracts\LiveWall.Contracts.csproj" />
     <ProjectReference Include="..\..\src\LiveWall.Infrastructure\LiveWall.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\LiveWall.Host\LiveWall.Host.csproj" />
     <ProjectReference Include="..\..\src\LiveWall.Platform.Windows\LiveWall.Platform.Windows.csproj" />
     <ProjectReference Include="..\RendererChildProbe\RendererChildProbe.csproj"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\LiveWall.Renderer.Video\LiveWall.Renderer.Video.csproj"
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>

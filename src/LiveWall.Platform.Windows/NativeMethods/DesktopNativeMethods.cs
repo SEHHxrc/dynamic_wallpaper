@@ -217,12 +217,15 @@ internal static class DesktopNativeMethods
         in NativeRect rectangle,
         nint brush);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern nint DefWindowProc(
         nint window,
         uint message,
         nuint wParam,
         nint lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int GetWindowText(nint window, [Out] char[] text, int maximumCount);
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern int GetMessage(

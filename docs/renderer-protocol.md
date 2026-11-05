@@ -59,6 +59,8 @@ Windows Raised Desktop 诊断已经证明，窗口父子关系和 Z-order 结构
 
 隔离的 Renderer-child DirectComposition 探针已经证明：独立 Renderer 可以只接收现有 `AttachSurface.windowHandle`，在 Host 容器内创建并拥有 child HWND、DComp target 和交换链，产生真实可见首帧，并在正常退出、父进程取消、Renderer 崩溃和 Explorer generation 变化后正确清理或重附着。因此 `HwndChild` binding 保留为协议 v1 当前路径，不修改 wire format、协议版本或 JSON Schema。
 
+ADR-011 接受 Video 内部 `vo=libmpv + D3D11 Render API`。其 `FirstFramePresented` 证明当前目标的有效提交，不保证物理屏幕已扫描显示；隐藏 provisional 可以先完成 Render/Present/Commit 与必要的 Commit 完成，再由 Host 激活。内部提交序列不是解码序列，暂停状态仍允许把当前有效帧重新渲染到新 binding，并以全新的目标提交证明恢复；不能重用旧 target 的结果。该边界不新增或修改任何 v1 DTO。C1.1 的隐藏容器实测只证明正式 Video Wire/GPU 目标链，可见性和实际桌面层级仍待单独验收。
+
 `RendererChildProbe` 仍是测试 Renderer，不是 Video/Web 产品 Renderer，但现已覆盖一次性令牌 `Hello`、`Initialize → Initialized`、`AttachSurface → SurfaceAttached`、`LoadWallpaper → ContentLoaded → FirstFramePresented`、递增 generation 的再次附着，以及 `Shutdown → ShutdownCompleted`。Host 正式会话已经实现单一接收泵、事件缓冲、阶段超时、session/generation 校验、未知事件和重复 messageId 拒绝，并已接入显式产品候选链。以上属于既有 v1 契约的实现与验证，不构成协议 1.1 变更；交互式桌面呈现和完整异常矩阵仍是独立的生产验收门禁。
 
 实现所有权固定如下：Infrastructure 只提供受限 Named Pipe、长度帧、一次性凭据等通用传输原语；Host/Orchestration 拥有进程启动、握手、Application 命令/事件与 Contracts DTO 映射、状态机和超时；Platform.Windows 不处理 Renderer IPC；Video/Web Renderer 只依赖 Contracts 并各自拥有引擎和子 HWND。诊断工具可复用 Infrastructure 传输代码，但不得被产品组合根直接当作 Renderer 实现。

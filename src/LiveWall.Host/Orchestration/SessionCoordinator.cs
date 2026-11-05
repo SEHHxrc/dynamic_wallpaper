@@ -458,21 +458,18 @@ internal sealed class SessionCoordinator : ISessionCoordinator
     {
         ArgumentNullException.ThrowIfNull(activeSessions);
         ArgumentNullException.ThrowIfNull(topology);
-        DesktopTopology desktopTopology = await desktopHost
-            .EnsureTopologyAsync(topology, cancellationToken)
-            .ConfigureAwait(false);
-        observer?.Invoke(new DesktopRecoveryMilestone(
-            hostGeneration,
-            0,
-            topology.Displays.Select(display => display.Id).ToArray(),
-            DesktopRecoveryPhase.TopologyReady));
-        Dictionary<DisplayId, DisplayDescriptor> displays = topology.Displays
-            .ToDictionary(display => display.Id);
         List<RecoveredSession> recovered = [];
         List<PreparedSurface> provisionalSurfaces = [];
 
         try
         {
+            // Recovery owns the invalidated generation even when the very first
+            // topology query is cancelled or fails during Host shutdown.
+            DesktopTopology desktopTopology = await desktopHost
+                .EnsureTopologyAsync(topology, cancellationToken).ConfigureAwait(false);
+            observer?.Invoke(new DesktopRecoveryMilestone(hostGeneration, 0,
+                topology.Displays.Select(display => display.Id).ToArray(), DesktopRecoveryPhase.TopologyReady));
+            Dictionary<DisplayId, DisplayDescriptor> displays = topology.Displays.ToDictionary(display => display.Id);
             for (int sessionIndex = 0; sessionIndex < activeSessions.Count; sessionIndex++)
             {
                 PreparedSession active = activeSessions[sessionIndex];
@@ -1307,7 +1304,7 @@ internal sealed class SessionCoordinator : ISessionCoordinator
                     return;
                 case RendererFailed failure:
                     throw new InvalidOperationException(
-                        $"Renderer failed during shutdown: {failure.ErrorCode}.");
+                        $"Renderer failed during shutdown: {failure.ErrorCode}. {failure.Message}");
                 case RendererPlaybackStateChanged:
                     continue;
                 default:

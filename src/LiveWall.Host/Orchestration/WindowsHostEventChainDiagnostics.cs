@@ -1,13 +1,10 @@
 using LiveWall.Application.Configuration;
-using LiveWall.Application.Importing;
 using LiveWall.Application.Library;
 using LiveWall.Application.Sessions;
 using LiveWall.Application.Policies;
-using LiveWall.Domain.Compatibility;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
 using LiveWall.Domain.Playback;
-using LiveWall.Domain.Sessions;
 using LiveWall.Domain.Wallpapers;
 using LiveWall.Host.Bootstrap;
 using LiveWall.Host.CommandLoop;
@@ -476,11 +473,7 @@ public static partial class WindowsHostEventChainDiagnostics
         ArgumentNullException.ThrowIfNull(topology);
         ArgumentNullException.ThrowIfNull(selection);
         WallpaperDefinition wallpaper = CreateSyntheticWallpaper();
-        WallpaperLibraryEntry entry = new(
-            wallpaper,
-            AppContext.BaseDirectory,
-            new CompatibilityReport(CompatibilityGrade.Native, []));
-        DiagnosticWallpaperRepository repository = new(entry);
+        ReadOnlyDiagnosticWallpaperRepository repository = new(SyntheticDiagnosticContent.CreateEntry(wallpaper));
         RendererProcessProvider provider = CreateRendererProvider(rendererExecutablePath, processLauncher);
         DisplayId[] displayIds = RendererProductCandidateDiagnostics.ResolveDisplayIds(
                 topology,
@@ -510,31 +503,10 @@ public static partial class WindowsHostEventChainDiagnostics
 
     private static RendererProcessProvider CreateRendererProvider(string executablePath,
         IRendererProcessLauncher? processLauncher = null) =>
-        new(new RendererProcessProviderOptions(
-            new RendererDescriptor(
-                new RendererId("renderer-child-dcomp-probe"),
-                "Renderer-child DirectComposition test Renderer",
-                new HashSet<WallpaperKind> { WallpaperKind.Scene },
-                new HashSet<string>(["HwndChild", "DirectComposition"])),
-            executablePath,
-            "diagnostics",
-            ["HwndChild", "DirectComposition"],
-            "en-US",
-            TimeSpan.FromSeconds(10)), processLauncher);
+        SyntheticDiagnosticContent.CreateProbeProvider(executablePath, processLauncher);
 
-    private static WallpaperDefinition CreateSyntheticWallpaper() => new(
-        new WallpaperId("diagnostic.synthetic.color"),
-        "1.0.0",
-        WallpaperKind.Scene,
-        "synthetic-color",
-        new WallpaperMetadata(
-            "LiveWall event-chain diagnostic color",
-            null,
-            null,
-            null,
-            new HashSet<string>()),
-        new WallpaperCapabilities(false, false, false, false, 30),
-        WallpaperOrigin.Native);
+    private static WallpaperDefinition CreateSyntheticWallpaper() =>
+        SyntheticDiagnosticContent.CreateWallpaper("LiveWall event-chain diagnostic color");
 
     private static void EnsureInitialApplySucceeded(WindowsHostRuntime runtime)
     {
@@ -677,28 +649,6 @@ public static partial class WindowsHostEventChainDiagnostics
     private sealed record DiagnosticComposition(
         WindowsHostComposition Composition,
         RendererProcessProvider RendererProvider);
-
-    private sealed class DiagnosticWallpaperRepository(WallpaperLibraryEntry entry)
-        : IWallpaperRepository
-    {
-        public Task<WallpaperLibraryEntry?> FindAsync(
-            WallpaperId id,
-            CancellationToken cancellationToken) =>
-            Task.FromResult<WallpaperLibraryEntry?>(id == entry.Definition.Id ? entry : null);
-
-        public Task<IReadOnlyList<WallpaperLibraryEntry>> ListAsync(
-            WallpaperQuery query,
-            CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<WallpaperLibraryEntry>>([entry]);
-
-        public Task SaveImportedAsync(
-            ImportedWallpaper wallpaper,
-            CancellationToken cancellationToken) =>
-            throw new NotSupportedException("Diagnostic repository is read-only.");
-
-        public Task RemoveAsync(WallpaperId id, CancellationToken cancellationToken) =>
-            throw new NotSupportedException("Diagnostic repository is read-only.");
-    }
 
     private sealed class DiagnosticHostConfigurationStore(HostConfiguration configuration,
         IHostConfigurationStore? persistence = null)

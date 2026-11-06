@@ -1,9 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using LiveWall.Application.Library;
-using LiveWall.Application.Sessions;
 using LiveWall.Domain.Compatibility;
-using LiveWall.Domain.Sessions;
 using LiveWall.Domain.Wallpapers;
 using LiveWall.Infrastructure.FileSystem;
 
@@ -58,9 +56,8 @@ public sealed class VideoProductCandidateAssets
     }
 
     internal RendererProcessProvider CreateProvider(string executablePath, string? evidencePath = null) => new(
-        new RendererProcessProviderOptions(new RendererDescriptor(new RendererId("video"), "LiveWall Video Renderer",
-            new HashSet<WallpaperKind> { WallpaperKind.Video }, new HashSet<string> { "HwndChild", "DirectComposition", "Video" }),
-            executablePath, "diagnostics-video", ["HwndChild", "DirectComposition", "Video"], "zh-CN", TimeSpan.FromSeconds(10)),
+        new RendererProcessProviderOptions(DefaultRendererProviders.VideoDescriptor,
+            executablePath, "diagnostics-video", DefaultRendererProviders.VideoCapabilities, "zh-CN", DefaultRendererProviders.VideoHandshakeTimeout),
         processEnvironmentFactory: (_, _, _) => evidencePath is null
             ? new Dictionary<string, string> { ["LIVEWALL_VIDEO_LIBMPV_PATH"] = LibraryPath }
             : new Dictionary<string, string> { ["LIVEWALL_VIDEO_LIBMPV_PATH"] = LibraryPath,

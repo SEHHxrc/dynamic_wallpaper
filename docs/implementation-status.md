@@ -1,6 +1,6 @@
 # 实现与验收状态
 
-> 截止日期：2026-11-03。本文只记录可变的工程状态，不改变 `ARCHITECTURE.md`、已接受 ADR 或专题设计中的规范边界。
+> 截止日期：2026-11-06。本文只记录可变的工程状态，不改变 `ARCHITECTURE.md`、已接受 ADR 或专题设计中的规范边界。
 
 ## 状态口径
 
@@ -9,7 +9,56 @@
 - **真实桌面验收通过**：已在声明支持的 Windows 完整 build、显示器和 DPI 矩阵中验证图标层级、恢复与清理。
 - **未接受**：不得用于生产能力声明，也不得加入 build allowlist。
 
-## 当前阶段：C1 有限范围关闭，C2 待启动（2026-11-03）
+## 当前阶段：C2.0 代码与自动验证完成，真实内容恢复未验收（2026-11-06）
+
+### C2.0：最小持久视频库与默认 Video Provider（2026-11-06）
+
+**只完成代码、自动测试和一次无内容的 Host 启动冒烟；没有真实桌面实验，C2 未关闭。**
+
+| 项 | 状态 |
+|---|---|
+| `JsonWallpaperRepository` 替换占位仓库：`library/<id>/<version>` + `library/.index.json`，索引是唯一提交点 | 已实现、自动验证通过 |
+| `WallpaperManifestReader` 严格读取 manifest v1；`WallpaperContentTree` 拒绝重解析点并计算内容哈希 | 已实现、自动验证通过 |
+| 保存时复制到私有 staging 后再校验，源目录后续改动进不了库；已提交版本不可变 | 已实现、自动验证通过 |
+| 读取失败关闭：索引损坏、内容被篡改、manifest 身份不符、入口经过重解析点时均视为不存在；损坏索引不会被覆盖 | 已实现、自动验证通过 |
+| 默认 Provider 只接受与 Host 同目录的 `LiveWall.Renderer.Video.exe`，缺失时无 Provider | 已实现、自动验证通过；未用真实 Renderer 跑过默认链 |
+| 启动恢复经真实仓库把 CanonicalContentRoot/入口交给 Renderer；缺失、篡改或无 Provider 时 Failed、零 Surface、保留 Assignment | 自动验证通过，桌面与 Renderer 为替身 |
+| 真实 Host 进程启动 | Release `--validate-startup` 退出码 0，配置为空，未创建 `library/`；不涉及内容恢复 |
+
+Debug/Release 各 **644/644**（Domain 12、Application 316、Renderer Contracts 121、Package 87、Windows 108），均 0 警告 0 错误；日志在 `artifacts/diagnostics/c2/`。Renderer v1 协议和 DTO 不变。
+
+**真实恢复尚不可达**，以下均未解决，不得记为通过：
+
+1. 两个生产 allowlist 仍为空，默认 Host 在 `EnsureTopologyAsync` 失败关闭（Adapter 的 `IsSupported` 为 false，不发送 Shell 请求），内容恢复终态为 TopologyFailed。是否及如何启用受 ADR-010 与 Stage B 门禁约束，C2 不改动。
+2. 还没有写入库的入口：`SaveImportedAsync` 没有 Importer、RPC 或工具调用方，产品内无法导入视频。
+3. Host 构建输出不含 Renderer 和 `native/libmpv-2.dll`，并排部署要等打包切片；当前开发 DLL 仍是 DevelopmentOnlyNotForDistribution。
+4. 仓库只收 Video；Web/Image 被拒绝。`.lwpkg` ZIP 读取未实现。
+
+已知限制：Renderer 占用旧内容时，移除或升级仍会提交索引，旧目录成为不可见残留，同版本重新导入时清除，否则一直留在磁盘（`.staging`/`.trash` 在每次 Host 启动后的首次写操作时清理，不含这类目录）。读取不重算内容哈希，只校验结构和文件存在；哈希只在保存时校验。
+
+顺带修正 `wallpaper.schema.json` 的 `entry` 模式：旧模式会放行 `content/../wallpaper.json` 和 `content/./x`，属于校验漏洞；代码读取器一直拒绝这些路径。
+
+门禁现状：`tools/check.ps1` 当前不能完整通过。`verify-boundaries.ps1` 依赖 PowerShell 7，本机只有 5.1；用内存中改过路径和编码处理的副本运行（未改仓库文件）时，唯一报错是 `.github` 缺少 README，该目录来自提交 1980a68，与 C2.0 无关。构建和测试是直接执行的，结果如上。
+
+### 代码清理（2026-11-06）
+
+在 C2.0 基础上做了一次不改行为的清理：删除分析器确认的未使用参数、只写字段、未使用属性、从未构造的 `RendererInitialized` 事件和 15 个多余 `using`；诊断编排中 5 处重复的 Host 装配、6 处会话结果投影、两份只读诊断仓库和合成内容/探针 Provider 合并为共享实现；两个 JSON 存储共用 `StrictJson`。Renderer v1、DTO/Schema、生产组合根与诊断入口参数均不变。Debug/Release 各 644/644，`VideoPresentationProbe` Release 构建 0 警告 0 错误。
+
+清理后复验（2026-11-07，`26200.9711 / session=4 / WinSta0\Default / 2880×1800 / 200%`，Release 可执行文件显式重建）：
+
+| 项 | 结果 |
+|---|---|
+| 隐藏 Host 产品链 + controls、candidate-plan、load-failure、first-frame-timeout、process-exit、pipe-disconnect | 7 项退出码均为 0，shellTouched=False，无 Renderer 残留；证据 `artifacts/diagnostics/cleanup/hidden-20261107-021440/` |
+| 只读桌面预检 | ready=True，未发 Shell 请求、未建 Surface/Renderer；`video-c1/video-product-65f3b7d9b24343e7bfb43a8d7e1cd02b.json` |
+| 获准可见 Video 控制 20 秒 | 四阶段完成，同 Renderer 新容器重附着，暂停 41 / 恢复 20 样本，ShutdownCompleted，Renderer ExitCode=0，自有清理 Complete；`video-c1/video-product-125d0cd25e6b4939b27bb0be04f88e1d.json` |
+| 获准可见合成色块 loop（3 轮 × 3 秒） | 3/3 首帧后单次 Replace，3 个 Renderer 优雅退休，自有窗口为零，addedWorkerCount=0；日志 `cleanup/visible-loop.log` |
+| 人工观察 | 用户确认两项均符合预期：画面、暂停/重附着/恢复、橙黄交替、图标/任务栏层级和原壁纸恢复正常 |
+
+Video 运行前直接子 WorkerW 为 0（此前遗留已不在），运行后为 1，ShellMutationRecovery=CleanupIncomplete，整轮退出码 6，内层分类 ProductFailure；与清理前 2026-11-03 C1.2 复测在同样 0→1 时的分类一致，属 ADR-010 已知限制，不是本次清理的回归。未销毁 Shell 窗口或重启 Explorer。清理后入口行为在上述代表范围内复验通过；fault/recovery/topology 等其余诊断模式只有编译与自动测试，未做可见复验。
+
+UI RPC DTO、`IProcessSupervisor`、导入端口、`RendererRestartPolicy` 等未被调用的类型属于架构文档规定、尚待实现的公开契约，按设计保留，不视为冗余。
+
+### C1 收口与历史边界（2026-11-03）
 
 P1.9.5 按下文 E 节既定条件关闭，不追加注销。P1.9.2 双屏系统恢复、P1.9.4 真实并发及双屏仍为 `Deferred / Pending hardware`；不把它们改为 Passed/Waived，也不阻塞 C0 隔离开发。
 

@@ -1,9 +1,7 @@
-using LiveWall.Application.Importing;
 using LiveWall.Application.Layouts;
 using LiveWall.Application.Library;
 using LiveWall.Application.Policies;
 using LiveWall.Application.Sessions;
-using LiveWall.Domain.Compatibility;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
 using LiveWall.Domain.Sessions;
@@ -265,8 +263,8 @@ public static class RendererProductCandidateDiagnostics
         if (request.VideoControlRecovery && (request.VideoAssets is null || request.VisibleDuration != TimeSpan.FromSeconds(20)))
             throw new ArgumentException("Video control acceptance requires Video assets and four 5-second stages.", nameof(request));
 
-        WallpaperLibraryEntry entry = request.VideoAssets?.Entry ?? new WallpaperLibraryEntry(
-            CreateSyntheticWallpaper(), AppContext.BaseDirectory, new CompatibilityReport(CompatibilityGrade.Native, []));
+        WallpaperLibraryEntry entry = request.VideoAssets?.Entry ??
+            SyntheticDiagnosticContent.CreateEntry(CreateSyntheticWallpaper());
         RendererProcessProvider provider = request.VideoAssets is null
             ? CreateRendererProvider(request.RendererExecutablePath, request.RendererEnvironment)
             : request.VideoAssets.CreateProvider(request.RendererExecutablePath, request.VideoControlEvidencePath);
@@ -282,7 +280,7 @@ public static class RendererProductCandidateDiagnostics
         IRendererProvider provider, IDesktopHost desktopHost, CancellationToken cancellationToken)
     {
         WallpaperDefinition wallpaper = entry.Definition;
-        InMemoryDiagnosticWallpaperRepository repository = new(entry);
+        ReadOnlyDiagnosticWallpaperRepository repository = new(entry);
         SessionCoordinator coordinator = new(
             repository,
             new DefaultLayoutPlanner(),
@@ -394,13 +392,7 @@ public static class RendererProductCandidateDiagnostics
 
             sessionResults = sessions
                 .OrderBy(item => item.SurfaceOrdinal)
-                .Select(item => new ProductCandidateSessionResult(
-                    item.Session.Id,
-                    item.Session.RendererId,
-                    Array.AsReadOnly(item.Session.Displays.ToArray()),
-                    item.SurfaceOrdinal,
-                    item.Surfaces.Count,
-                    (item.Renderer as RendererProtocolSession)?.ProcessId))
+                .Select(item => ToSessionResult(item))
                 .ToArray();
             request.FirstFrameCommitted?.Invoke(sessionResults);
             if (request.VideoControlRecovery)
@@ -515,39 +507,19 @@ public static class RendererProductCandidateDiagnostics
                 nameof(request));
         }
 
-        WallpaperDefinition wallpaper = CreateSyntheticWallpaper();
-        InMemoryDiagnosticWallpaperRepository repository = new(
-            new WallpaperLibraryEntry(
-                wallpaper,
-                AppContext.BaseDirectory,
-                new CompatibilityReport(CompatibilityGrade.Native, [])));
-        RendererProcessProvider provider = CreateRendererProvider(
-            request.RendererExecutablePath,
-            request.RendererEnvironment);
-        await using WindowsDesktopHost desktopHost =
-            WindowsDesktopHost.CreateExperimentalDiagnostics(request.ShellSnapshot);
-        SessionCoordinator coordinator = new(
-            repository,
-            new DefaultLayoutPlanner(),
-            new RendererProviderSelector([provider]),
-            desktopHost,
-            new RuntimeEnvironment("win-x64", true, new HashSet<string>()),
-            TimeSpan.FromSeconds(10),
-            retirementPolicy: request.RetirementTimeout is null
-                ? null
-                : new SessionRetirementPolicy(
-                    request.RetirementTimeout.Value,
-                    TimeSpan.FromSeconds(2)));
-        await using HostCommandLoop commandLoop = new(
-            coordinator,
-            new DefaultPlaybackPolicyEvaluator());
-
-        await desktopHost.EnsureTopologyAsync(request.DisplayTopology, cancellationToken)
+        await using SyntheticDiagnosticHost host = await StartSyntheticHostAsync(
+                request.RendererExecutablePath,
+                request.RendererEnvironment,
+                request.ShellSnapshot,
+                request.DisplayTopology,
+                TimeSpan.FromSeconds(10),
+                retirementPolicy: request.RetirementTimeout is null
+                    ? null
+                    : new SessionRetirementPolicy(request.RetirementTimeout.Value, TimeSpan.FromSeconds(2)),
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        await commandLoop.SendAsync(
-                new DisplayTopologyChangedCommand(request.DisplayTopology),
-                cancellationToken)
-            .ConfigureAwait(false);
+        WallpaperDefinition wallpaper = host.Wallpaper;
+        HostCommandLoop commandLoop = host.CommandLoop;
         IReadOnlyList<DisplayId> selectedDisplays = ResolveDisplayIds(
             request.DisplayTopology,
             request.DisplaySelection ?? ProductCandidateDisplaySelection.Primary);
@@ -652,13 +624,7 @@ public static class RendererProductCandidateDiagnostics
             }
             ProductCandidateSessionResult[] sessionResults = prepared
                 .OrderBy(item => item.SurfaceOrdinal)
-                .Select(item => new ProductCandidateSessionResult(
-                    item.Session.Id,
-                    item.Session.RendererId,
-                    Array.AsReadOnly(item.Session.Displays.ToArray()),
-                    item.SurfaceOrdinal,
-                    item.Surfaces.Count,
-                    (item.Renderer as RendererProtocolSession)?.ProcessId))
+                .Select(item => ToSessionResult(item))
                 .ToArray();
             iterations.Add(new RendererProductCandidateIterationResult(
                 iteration,
@@ -718,34 +684,16 @@ public static class RendererProductCandidateDiagnostics
                 nameof(request));
         }
 
-        WallpaperDefinition wallpaper = CreateSyntheticWallpaper();
-        InMemoryDiagnosticWallpaperRepository repository = new(
-            new WallpaperLibraryEntry(
-                wallpaper,
-                AppContext.BaseDirectory,
-                new CompatibilityReport(CompatibilityGrade.Native, [])));
-        RendererProcessProvider provider = CreateRendererProvider(
-            request.RendererExecutablePath,
-            request.RendererEnvironment);
-        await using WindowsDesktopHost desktopHost =
-            WindowsDesktopHost.CreateExperimentalDiagnostics(request.ShellSnapshot);
-        SessionCoordinator coordinator = new(
-            repository,
-            new DefaultLayoutPlanner(),
-            new RendererProviderSelector([provider]),
-            desktopHost,
-            new RuntimeEnvironment("win-x64", true, new HashSet<string>()),
-            request.RendererStageTimeout ?? TimeSpan.FromSeconds(10));
-        await using HostCommandLoop commandLoop = new(
-            coordinator,
-            new DefaultPlaybackPolicyEvaluator());
-
-        await desktopHost.EnsureTopologyAsync(request.DisplayTopology, cancellationToken)
+        await using SyntheticDiagnosticHost host = await StartSyntheticHostAsync(
+                request.RendererExecutablePath,
+                request.RendererEnvironment,
+                request.ShellSnapshot,
+                request.DisplayTopology,
+                request.RendererStageTimeout ?? TimeSpan.FromSeconds(10),
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        await commandLoop.SendAsync(
-                new DisplayTopologyChangedCommand(request.DisplayTopology),
-                cancellationToken)
-            .ConfigureAwait(false);
+        WallpaperDefinition wallpaper = host.Wallpaper;
+        HostCommandLoop commandLoop = host.CommandLoop;
         IReadOnlyList<DisplayId> selectedDisplays = ResolveDisplayIds(
             request.DisplayTopology,
             request.DisplaySelection ?? ProductCandidateDisplaySelection.All);
@@ -913,13 +861,7 @@ public static class RendererProductCandidateDiagnostics
         return new RendererProductCandidateIterationResult(
             iteration,
             generation,
-            Array.AsReadOnly(prepared.Select(item => new ProductCandidateSessionResult(
-                item.Session.Id,
-                item.Session.RendererId,
-                Array.AsReadOnly(item.Session.Displays.ToArray()),
-                item.SurfaceOrdinal,
-                item.Surfaces.Count,
-                (item.Renderer as RendererProtocolSession)?.ProcessId)).ToArray()),
+            Array.AsReadOnly(prepared.Select(item => ToSessionResult(item)).ToArray()),
             prepared.SelectMany(item => item.Surfaces).Count(),
             result,
             timeline,
@@ -941,34 +883,16 @@ public static class RendererProductCandidateDiagnostics
                 "Recovery observation durations must be positive.");
         }
 
-        WallpaperDefinition wallpaper = CreateSyntheticWallpaper();
-        InMemoryDiagnosticWallpaperRepository repository = new(
-            new WallpaperLibraryEntry(
-                wallpaper,
-                AppContext.BaseDirectory,
-                new CompatibilityReport(CompatibilityGrade.Native, [])));
-        RendererProcessProvider provider = CreateRendererProvider(
-            request.RendererExecutablePath,
-            request.RendererEnvironment);
-        await using WindowsDesktopHost desktopHost =
-            WindowsDesktopHost.CreateExperimentalDiagnostics(request.ShellSnapshot);
-        SessionCoordinator coordinator = new(
-            repository,
-            new DefaultLayoutPlanner(),
-            new RendererProviderSelector([provider]),
-            desktopHost,
-            new RuntimeEnvironment("win-x64", true, new HashSet<string>()),
-            request.RendererStageTimeout ?? TimeSpan.FromSeconds(10));
-        await using HostCommandLoop commandLoop = new(
-            coordinator,
-            new DefaultPlaybackPolicyEvaluator());
-
-        await desktopHost.EnsureTopologyAsync(request.DisplayTopology, cancellationToken)
+        await using SyntheticDiagnosticHost host = await StartSyntheticHostAsync(
+                request.RendererExecutablePath,
+                request.RendererEnvironment,
+                request.ShellSnapshot,
+                request.DisplayTopology,
+                request.RendererStageTimeout ?? TimeSpan.FromSeconds(10),
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        await commandLoop.SendAsync(
-                new DisplayTopologyChangedCommand(request.DisplayTopology),
-                cancellationToken)
-            .ConfigureAwait(false);
+        WallpaperDefinition wallpaper = host.Wallpaper;
+        HostCommandLoop commandLoop = host.CommandLoop;
         IReadOnlyList<DisplayId> selectedDisplays = ResolveDisplayIds(
             request.DisplayTopology,
             request.DisplaySelection ?? ProductCandidateDisplaySelection.All);
@@ -1027,13 +951,7 @@ public static class RendererProductCandidateDiagnostics
                     $"{request.ExpectedCompletionMode} Session identity boundary.");
             }
             ProductCandidateSessionResult[] recoveredResults = recovered.Select(item =>
-                new ProductCandidateSessionResult(
-                    item.Session.Id,
-                    item.Session.RendererId,
-                    Array.AsReadOnly(item.Session.Displays.ToArray()),
-                    item.SurfaceOrdinal,
-                    item.Surfaces.Count,
-                    (item.Renderer as RendererProtocolSession)?.ProcessId)).ToArray();
+                ToSessionResult(item)).ToArray();
             await Task.Delay(request.RecoveredVisibleDuration, cancellationToken)
                 .ConfigureAwait(false);
             finalRetirement = await commandLoop.RetireActiveSessionsForDiagnosticsAsync(
@@ -1095,35 +1013,16 @@ public static class RendererProductCandidateDiagnostics
                 "Topology observation duration must be between 1 millisecond and 30 seconds.");
         }
 
-        WallpaperDefinition wallpaper = CreateSyntheticWallpaper();
-        InMemoryDiagnosticWallpaperRepository repository = new(
-            new WallpaperLibraryEntry(
-                wallpaper,
-                AppContext.BaseDirectory,
-                new CompatibilityReport(CompatibilityGrade.Native, [])));
-        RendererProcessProvider provider = CreateRendererProvider(
-            request.RendererExecutablePath,
-            environmentTarget: null);
-        await using WindowsDesktopHost desktopHost =
-            WindowsDesktopHost.CreateExperimentalDiagnostics(request.ShellSnapshot);
-        SessionCoordinator coordinator = new(
-            repository,
-            new DefaultLayoutPlanner(),
-            new RendererProviderSelector([provider]),
-            desktopHost,
-            new RuntimeEnvironment("win-x64", true, new HashSet<string>()),
-            request.RendererStageTimeout ?? TimeSpan.FromSeconds(10));
-        await using HostCommandLoop commandLoop = new(
-            coordinator,
-            new DefaultPlaybackPolicyEvaluator(),
-            new DefaultLayoutPlanner());
-
-        await desktopHost.EnsureTopologyAsync(request.InitialTopology, cancellationToken)
+        await using SyntheticDiagnosticHost host = await StartSyntheticHostAsync(
+                request.RendererExecutablePath,
+                null,
+                request.ShellSnapshot,
+                request.InitialTopology,
+                request.RendererStageTimeout ?? TimeSpan.FromSeconds(10),
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        await commandLoop.SendAsync(
-                new DisplayTopologyChangedCommand(request.InitialTopology),
-                cancellationToken)
-            .ConfigureAwait(false);
+        WallpaperDefinition wallpaper = host.Wallpaper;
+        HostCommandLoop commandLoop = host.CommandLoop;
         IReadOnlyList<DisplayId> selectedDisplays = ResolveDisplayIds(
             request.InitialTopology,
             request.DisplaySelection ?? ProductCandidateDisplaySelection.All);
@@ -1144,7 +1043,7 @@ public static class RendererProductCandidateDiagnostics
             if (request.TransitionGuard is { } guardRequest)
             {
                 transitionGuard = await DesktopTransitionGuardProbe.ArmAsync(
-                        desktopHost,
+                        host.DesktopHost,
                         request.InitialTopology,
                         guardRequest.TargetDisplayId,
                         guardRequest.GuardColorReference,
@@ -1234,13 +1133,7 @@ public static class RendererProductCandidateDiagnostics
                 }
 
                 ProductCandidateSessionResult[] sessionResults = active.Select(item =>
-                    new ProductCandidateSessionResult(
-                        item.Session.Id,
-                        item.Session.RendererId,
-                        Array.AsReadOnly(item.Session.Displays.ToArray()),
-                        item.SurfaceOrdinal,
-                        item.Surfaces.Count,
-                        (item.Renderer as RendererProtocolSession)?.ProcessId)).ToArray();
+                    ToSessionResult(item)).ToArray();
                 transitions.Add(new RendererProductCandidateTopologyTransition(
                     index,
                     current,
@@ -1446,38 +1339,19 @@ public static class RendererProductCandidateDiagnostics
                 "Final topology observation duration must be between 1 millisecond and 30 seconds.");
         }
 
-        WallpaperDefinition wallpaper = CreateSyntheticWallpaper();
-        InMemoryDiagnosticWallpaperRepository repository = new(
-            new WallpaperLibraryEntry(
-                wallpaper,
-                AppContext.BaseDirectory,
-                new CompatibilityReport(CompatibilityGrade.Native, [])));
-        RendererProcessProvider provider = CreateRendererProvider(
-            request.RendererExecutablePath,
-            environmentTarget: null);
-        await using WindowsDesktopHost desktopHost =
-            WindowsDesktopHost.CreateExperimentalDiagnostics(request.ShellSnapshot);
-        SessionCoordinator coordinator = new(
-            repository,
-            new DefaultLayoutPlanner(),
-            new RendererProviderSelector([provider]),
-            desktopHost,
-            new RuntimeEnvironment("win-x64", true, new HashSet<string>()),
-            request.RendererStageTimeout ?? TimeSpan.FromSeconds(10));
-        ISessionCoordinator commandCoordinator = request.PreparedCommitHold is TimeSpan hold
-            ? new DiagnosticPreparedCommitHoldCoordinator(coordinator, hold)
-            : coordinator;
-        await using HostCommandLoop commandLoop = new(
-            commandCoordinator,
-            new DefaultPlaybackPolicyEvaluator(),
-            new DefaultLayoutPlanner());
-
-        await desktopHost.EnsureTopologyAsync(request.InitialTopology, cancellationToken)
+        await using SyntheticDiagnosticHost host = await StartSyntheticHostAsync(
+                request.RendererExecutablePath,
+                null,
+                request.ShellSnapshot,
+                request.InitialTopology,
+                request.RendererStageTimeout ?? TimeSpan.FromSeconds(10),
+                decorateCoordinator: coordinator => request.PreparedCommitHold is TimeSpan hold
+                    ? new DiagnosticPreparedCommitHoldCoordinator(coordinator, hold)
+                    : coordinator,
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        await commandLoop.SendAsync(
-                new DisplayTopologyChangedCommand(request.InitialTopology),
-                cancellationToken)
-            .ConfigureAwait(false);
+        WallpaperDefinition wallpaper = host.Wallpaper;
+        HostCommandLoop commandLoop = host.CommandLoop;
         IReadOnlyList<DisplayId> selectedDisplays = ResolveDisplayIds(
             request.InitialTopology,
             request.DisplaySelection ?? ProductCandidateDisplaySelection.All);
@@ -1564,13 +1438,7 @@ public static class RendererProductCandidateDiagnostics
                     "Final topology churn state retained a Session for a disconnected display.");
             }
             ProductCandidateSessionResult[] activeResults = active.Select(item =>
-                new ProductCandidateSessionResult(
-                    item.Session.Id,
-                    item.Session.RendererId,
-                    Array.AsReadOnly(item.Session.Displays.ToArray()),
-                    item.SurfaceOrdinal,
-                    item.Surfaces.Count,
-                    (item.Renderer as RendererProtocolSession)?.ProcessId)).ToArray();
+                ToSessionResult(item)).ToArray();
 
             finalRetirement = await commandLoop.RetireActiveSessionsForDiagnosticsAsync(
                     CancellationToken.None)
@@ -1627,18 +1495,8 @@ public static class RendererProductCandidateDiagnostics
             }
         }
 
-        return new RendererProcessProvider(
-            new RendererProcessProviderOptions(
-                new RendererDescriptor(
-                    new RendererId("renderer-child-dcomp-probe"),
-                    "Renderer-child DirectComposition test Renderer",
-                    new HashSet<WallpaperKind> { WallpaperKind.Scene },
-                    new HashSet<string>(["HwndChild", "DirectComposition"])),
-                executablePath,
-                "diagnostics",
-                ["HwndChild", "DirectComposition"],
-                "en-US",
-                TimeSpan.FromSeconds(10)),
+        return SyntheticDiagnosticContent.CreateProbeProvider(
+            executablePath,
             processEnvironmentFactory: environmentTarget is null
                 ? null
                 : (_, iteration, surfaceOrdinal) =>
@@ -1648,39 +1506,84 @@ public static class RendererProductCandidateDiagnostics
                         : null);
     }
 
-    private static WallpaperDefinition CreateSyntheticWallpaper() => new(
-        new WallpaperId("diagnostic.synthetic.color"),
-        "1.0.0",
-        WallpaperKind.Scene,
-        "synthetic-color",
-        new WallpaperMetadata(
-            "LiveWall product candidate color",
-            null,
-            null,
-            null,
-            new HashSet<string>()),
-        new WallpaperCapabilities(false, false, false, false, 30),
-        WallpaperOrigin.Native);
+    private static WallpaperDefinition CreateSyntheticWallpaper() =>
+        SyntheticDiagnosticContent.CreateWallpaper("LiveWall product candidate color");
 
-    private sealed class InMemoryDiagnosticWallpaperRepository(WallpaperLibraryEntry entry)
-        : IWallpaperRepository
+    private static ProductCandidateSessionResult ToSessionResult(PreparedSession item) => new(
+        item.Session.Id,
+        item.Session.RendererId,
+        Array.AsReadOnly(item.Session.Displays.ToArray()),
+        item.SurfaceOrdinal,
+        item.Surfaces.Count,
+        (item.Renderer as RendererProtocolSession)?.ProcessId);
+
+    private static async Task<SyntheticDiagnosticHost> StartSyntheticHostAsync(
+        string rendererExecutablePath,
+        DiagnosticRendererEnvironmentTarget? environmentTarget,
+        WindowsShellSnapshot shellSnapshot,
+        DisplayTopology initialTopology,
+        TimeSpan rendererStageTimeout,
+        SessionRetirementPolicy? retirementPolicy = null,
+        Func<SessionCoordinator, ISessionCoordinator>? decorateCoordinator = null,
+        CancellationToken cancellationToken = default)
     {
-        public Task<WallpaperLibraryEntry?> FindAsync(
-            WallpaperId id,
-            CancellationToken cancellationToken) =>
-            Task.FromResult<WallpaperLibraryEntry?>(id == entry.Definition.Id ? entry : null);
-
-        public Task<IReadOnlyList<WallpaperLibraryEntry>> ListAsync(
-            WallpaperQuery query,
-            CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<WallpaperLibraryEntry>>([entry]);
-
-        public Task SaveImportedAsync(
-            ImportedWallpaper wallpaper,
-            CancellationToken cancellationToken) =>
-            throw new NotSupportedException("Diagnostic repository is read-only.");
-
-        public Task RemoveAsync(WallpaperId id, CancellationToken cancellationToken) =>
-            throw new NotSupportedException("Diagnostic repository is read-only.");
+        WallpaperDefinition wallpaper = CreateSyntheticWallpaper();
+        RendererProcessProvider provider = CreateRendererProvider(rendererExecutablePath, environmentTarget);
+        WindowsDesktopHost desktopHost = WindowsDesktopHost.CreateExperimentalDiagnostics(shellSnapshot);
+        HostCommandLoop? commandLoop = null;
+        try
+        {
+            SessionCoordinator coordinator = new(
+                new ReadOnlyDiagnosticWallpaperRepository(SyntheticDiagnosticContent.CreateEntry(wallpaper)),
+                new DefaultLayoutPlanner(),
+                new RendererProviderSelector([provider]),
+                desktopHost,
+                new RuntimeEnvironment("win-x64", true, new HashSet<string>()),
+                rendererStageTimeout,
+                retirementPolicy: retirementPolicy);
+            commandLoop = new HostCommandLoop(
+                decorateCoordinator?.Invoke(coordinator) ?? coordinator,
+                new DefaultPlaybackPolicyEvaluator());
+            await desktopHost.EnsureTopologyAsync(initialTopology, cancellationToken).ConfigureAwait(false);
+            await commandLoop.SendAsync(new DisplayTopologyChangedCommand(initialTopology), cancellationToken)
+                .ConfigureAwait(false);
+            return new SyntheticDiagnosticHost(wallpaper, desktopHost, commandLoop);
+        }
+        catch
+        {
+            await new SyntheticDiagnosticHost(wallpaper, desktopHost, commandLoop).DisposeAsync()
+                .ConfigureAwait(false);
+            throw;
+        }
     }
+
+    /// <summary>Disposes the command loop before the desktop host it drives.</summary>
+    private sealed class SyntheticDiagnosticHost(
+        WallpaperDefinition wallpaper,
+        WindowsDesktopHost desktopHost,
+        HostCommandLoop? commandLoop) : IAsyncDisposable
+    {
+        public WallpaperDefinition Wallpaper => wallpaper;
+
+        public WindowsDesktopHost DesktopHost => desktopHost;
+
+        public HostCommandLoop CommandLoop =>
+            commandLoop ?? throw new InvalidOperationException("The diagnostic Host did not start.");
+
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                if (commandLoop is not null)
+                {
+                    await commandLoop.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                await desktopHost.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
 }

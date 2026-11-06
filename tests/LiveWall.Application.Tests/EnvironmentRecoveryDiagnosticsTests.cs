@@ -1,6 +1,5 @@
 using System.Text.Json;
 using FluentAssertions;
-using LiveWall.Application.Sessions;
 using LiveWall.Host.Orchestration;
 
 namespace LiveWall.Application.Tests;

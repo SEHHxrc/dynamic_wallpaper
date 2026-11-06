@@ -6,7 +6,6 @@ using LiveWall.Domain.Layouts;
 using LiveWall.Domain.Playback;
 using LiveWall.Domain.Sessions;
 using LiveWall.Domain.Wallpapers;
-using LiveWall.Host.CommandLoop;
 
 namespace LiveWall.Host.Orchestration;
 

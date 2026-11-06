@@ -1,6 +1,5 @@
 using FluentAssertions;
 using LiveWall.Application.Configuration;
-using LiveWall.Application.Policies;
 using LiveWall.Application.Sessions;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Playback;

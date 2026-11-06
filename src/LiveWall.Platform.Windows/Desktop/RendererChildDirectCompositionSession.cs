@@ -32,7 +32,6 @@ public sealed class RendererChildDirectCompositionSession : IAsyncDisposable
     private IDCompositionDevice? compositionDevice;
     private IDCompositionTarget? compositionTarget;
     private IDCompositionVisual? compositionVisual;
-    private uint? lastPresentedColor;
     private int presentationWidth;
     private int presentationHeight;
 
@@ -186,7 +185,6 @@ public sealed class RendererChildDirectCompositionSession : IAsyncDisposable
         {
             throw new InvalidOperationException($"DwmFlush failed (HRESULT=0x{flushResult:X8}).");
         }
-        lastPresentedColor = colorReference;
     }
 
     private void ResizeOnDispatcher(int width, int height)

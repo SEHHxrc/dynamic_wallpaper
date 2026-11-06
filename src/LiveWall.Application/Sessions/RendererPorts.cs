@@ -79,8 +79,6 @@ public sealed record ShutdownRenderer(long Generation, string Reason) : Renderer
 
 public abstract record RendererEvent(long Generation);
 
-public sealed record RendererInitialized(long Generation) : RendererEvent(Generation);
-
 public sealed record RendererSurfaceAttached(long Generation) : RendererEvent(Generation);
 
 public sealed record RendererContentLoaded(long Generation) : RendererEvent(Generation);

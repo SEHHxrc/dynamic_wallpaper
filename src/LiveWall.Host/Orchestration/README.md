@@ -1,5 +1,7 @@
 # Orchestration
 
+2026-11-06 C2.0：`DefaultRendererProviders` 是正式组合根的 Renderer 集合，只接受与 Host 同目录的 Video 可执行文件，缺失时为空并失败关闭；libmpv 由 Renderer 自行定位并校验哈希。只有替身自动验证，未用真实 Renderer 跑过默认链。
+
 C1.3（2026-11-03）代码、隐藏正式进程及单屏可见控制代表验收通过，Debug/Release 各 573/573；**C1 按有限范围关闭，C2 待启动**。新增 VideoControlCandidateDiagnostics 共用 Host 单写者，播放/暂停/重附着保持暂停/恢复各 5 秒，等待当前 generation 的实际反馈及新目标首帧，不重启 Explorer。RendererProtocolSession 仍只有一个接收泵/阶段消费者；ActiveFailure 通知不抢阶段事件，匹配已发送命令的迟到控制回执不能放行新 generation。活动正式 Renderer 失败时保留 Assignment、有界退休；共享恢复仍由原事务清理，强类型故障不被诊断吞掉。可见验收人工正常、实际 ExitCode=0、自有清理完整；本轮未新增 WorkerW，不能追改既有 mutation。双屏/真实 Video Explorer/长期资源及生产附着门禁保留。
 
 2026-11-03 C1.2：显式 Video 产品候选通过同一 RendererProductCandidateDiagnostics 接入正式 Provider/会话；VideoAssets 是固定 fixture 与 DLL 的诊断装配，不是生产配置、C2 仓库或 Application 端口。共用核心仍由 HostCommandLoop 唯一提交，内部 IDesktopHost 注入点仅用于自动/隐藏验证。已修复 ShutdownCompleted 后立即杀进程的竞态：已回执进程最多等待 1 秒自然退出，未回执会话及时终止，逾期强制退出仍有界；重复 Dispose 共享完成任务，不复用 Apply deadline。获准的修复后主屏 10 秒复测完成正式首帧、一次 Replace、实际 ExitCode=0 及完整自有清理，人工确认覆盖、运动、桌面层级和结束恢复全部正常；单屏呈现与正常退休代表项通过，首轮 -1 失败保留。最近 Debug/Release 各 559/559；Shell 新增 WorkerW CleanupIncomplete/整轮退出码 6，C1 整体、生产 selector/allowlist 门禁保留。

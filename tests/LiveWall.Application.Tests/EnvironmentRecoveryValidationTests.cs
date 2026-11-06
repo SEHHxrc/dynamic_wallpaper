@@ -1,5 +1,4 @@
 using FluentAssertions;
-using LiveWall.Application.Layouts;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Sessions;
 using LiveWall.Host.Orchestration;

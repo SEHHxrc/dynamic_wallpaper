@@ -354,7 +354,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         HostCommand command,
         CancellationToken cancellationToken)
     {
-        if (stopping && !state.ShutdownRequested) RequestShutdown(CancellationToken.None);
+        if (stopping && !state.ShutdownRequested) RequestShutdown();
         if (state.ShutdownRequested)
         {
             return HandleStoppingAsync(command);
@@ -487,7 +487,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                 failed,
                 cancellationToken),
             GetHostStateCommand => HostCommandResult.Success(state.Revision, state.Snapshot()),
-            ShutdownCommand => RequestShutdown(cancellationToken),
+            ShutdownCommand => RequestShutdown(),
             _ => HostCommandResult.Reject(state.Revision, "host.command.unsupported"),
         };
 
@@ -2058,7 +2058,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         return HostCommandResult.Success(state.Revision);
     }
 
-    private HostCommandResult RequestShutdown(CancellationToken cancellationToken)
+    private HostCommandResult RequestShutdown()
     {
         activeSessionEnvironmentOperation?.Complete(SessionEnvironmentTerminalState.Cancelled,
             reason: SessionEnvironmentFailureReason.HostStopping);

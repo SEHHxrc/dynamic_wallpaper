@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using LiveWall.Application.Configuration;
 using LiveWall.Domain.Displays;
 using LiveWall.Domain.Layouts;
@@ -16,7 +15,7 @@ public sealed class JsonHostConfigurationStore : IHostConfigurationStore
     private const string UnsupportedVersionError = "configuration.schema.unsupported";
     private const string InvalidValueError = "configuration.value.invalid";
 
-    private static readonly JsonSerializerOptions SerializerOptions = CreateSerializerOptions();
+    private static readonly JsonSerializerOptions SerializerOptions = StrictJson.CreateOptions();
     private readonly string playbackPolicyPath;
     private readonly string assignmentsPath;
 
@@ -195,17 +194,6 @@ public sealed class JsonHostConfigurationStore : IHostConfigurationStore
 
     private static FileLoadResult<T> Invalid<T>(T fallback, string errorCode) =>
         new(fallback, ConfigurationFileStatus.Invalid(errorCode));
-
-    private static JsonSerializerOptions CreateSerializerOptions()
-    {
-        JsonSerializerOptions options = new(JsonSerializerDefaults.Web)
-        {
-            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-            WriteIndented = true,
-        };
-        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false));
-        return options;
-    }
 
     private sealed record PlaybackPolicyDocument(int SchemaVersion, UserPlaybackPolicy? Policy);
 

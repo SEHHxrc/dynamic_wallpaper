@@ -53,8 +53,7 @@ internal static class Program
         try
         {
             shutdownOrder = WindowsProcessShutdownOrder.ForHost();
-            runtime = WindowsHostCompositionRoot.Create(
-                options.ConfigurationDirectory);
+            runtime = WindowsHostCompositionRoot.Create(options.ConfigurationDirectory, options.InstallationScope);
             lifetime = new HostProcessLifetime(runtime, receipt => AtomicFileWriter.WriteJsonAsync(
                 Path.Combine(options.ConfigurationDirectory, "host-exit-receipt.json"), receipt),
                 (receipt, token) => AtomicFileWriter.WriteJsonAsync(

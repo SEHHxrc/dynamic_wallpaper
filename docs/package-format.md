@@ -30,3 +30,18 @@ wallpaper.lwpkg
 
 任何一步失败都不得留下可见的半导入条目。
 
+## 库内布局（C2.0）
+
+```text
+library/
+├─ .index.json              # 唯一提交点：schemaVersion、id、version、contentHash、origin、grade、issues
+├─ .staging/<随机>/          # 校验中的私有副本
+├─ .trash/<随机>/            # 待删除内容
+└─ <id>/<version>/          # 规范化内容，含 wallpaper.json
+```
+
+每个 id 只有一个活动版本。索引未列出的目录不可见。已提交版本不可变，仅大小写不同的版本号视为同一版本。C2.0 只接受 Video，`.lwpkg` ZIP 读取尚未实现。
+
+## 内容哈希
+
+按正斜杠相对路径的序数顺序，对每个文件依次写入：UTF-8 路径、一个零字节、8 字节小端长度、文件的 SHA-256 原始字节；再对整体取 SHA-256，输出大写十六进制。重解析点直接拒绝，文件数上限 10000。

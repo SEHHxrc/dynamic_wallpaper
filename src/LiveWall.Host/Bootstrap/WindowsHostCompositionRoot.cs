@@ -3,10 +3,10 @@ using LiveWall.Application.Library;
 using LiveWall.Application.Policies;
 using LiveWall.Application.Sessions;
 using LiveWall.Application.Configuration;
-using LiveWall.Domain.Wallpapers;
 using LiveWall.Host.CommandLoop;
 using LiveWall.Host.Orchestration;
 using LiveWall.Infrastructure.Configuration;
+using LiveWall.Infrastructure.Persistence;
 using LiveWall.Platform.Windows.Desktop;
 using LiveWall.Platform.Windows.Displays;
 
@@ -14,19 +14,26 @@ namespace LiveWall.Host.Bootstrap;
 
 internal static class WindowsHostCompositionRoot
 {
-    public static WindowsHostRuntime Create(string configurationDirectory)
-        => CreateComposition(configurationDirectory).Runtime;
+    public static WindowsHostRuntime Create(string configurationDirectory, string installationScope) =>
+        CreateComposition(
+            configurationDirectory,
+            CreateProductionOptions(configurationDirectory, installationScope)).Runtime;
+
+    private static WindowsHostCompositionOptions CreateProductionOptions(
+        string configurationDirectory,
+        string installationScope) =>
+        new(
+            new JsonWallpaperRepository(Path.Combine(configurationDirectory, "library")),
+            DefaultRendererProviders.Create(installationScope, AppContext.BaseDirectory),
+            DesktopAttachmentPolicy.Production);
 
     internal static WindowsHostComposition CreateComposition(
         string configurationDirectory,
-        WindowsHostCompositionOptions? options = null)
+        WindowsHostCompositionOptions options)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(configurationDirectory);
+        ArgumentNullException.ThrowIfNull(options);
 
-        options ??= new WindowsHostCompositionOptions(
-            new UnavailableWallpaperRepository(),
-            [],
-            DesktopAttachmentPolicy.Production);
         WindowsDisplayTopologySource displayTopologySource = new();
         ShellTopologySnapshot shellTopology = WindowsShellTopologyDiagnostics.CaptureSnapshot();
         WindowsBuildIdentity build = shellTopology.BuildIdentity;
@@ -73,6 +80,7 @@ internal static class WindowsHostCompositionRoot
             {
                 await desktopHost.DisposeAsync().ConfigureAwait(false);
                 displayTopologySource.Dispose();
+                (options.WallpaperRepository as IDisposable)?.Dispose();
             },
             options.PersistConfiguration);
         return new WindowsHostComposition(
@@ -81,29 +89,6 @@ internal static class WindowsHostCompositionRoot
             eventBridge,
             desktopHost,
             displayTopologySource);
-    }
-
-    private sealed class UnavailableWallpaperRepository : IWallpaperRepository
-    {
-        public Task<WallpaperLibraryEntry?> FindAsync(
-            WallpaperId id,
-            CancellationToken cancellationToken) =>
-            Task.FromResult<WallpaperLibraryEntry?>(null);
-
-        public Task<IReadOnlyList<WallpaperLibraryEntry>> ListAsync(
-            WallpaperQuery query,
-            CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<WallpaperLibraryEntry>>([]);
-
-        public Task SaveImportedAsync(
-            LiveWall.Application.Importing.ImportedWallpaper wallpaper,
-            CancellationToken cancellationToken) =>
-            throw new NotSupportedException(
-                "The production wallpaper repository is not implemented yet.");
-
-        public Task RemoveAsync(WallpaperId id, CancellationToken cancellationToken) =>
-            throw new NotSupportedException(
-                "The production wallpaper repository is not implemented yet.");
     }
 }
 

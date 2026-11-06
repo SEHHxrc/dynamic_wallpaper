@@ -44,6 +44,8 @@ Bootstrap 还会生成被 Git 忽略的 `.vscode/settings.json`，让 C# 与 C# 
 
 ## 当前边界
 
+2026-11-06 当前进度：**C2.0 代码与自动验证完成，真实内容恢复未验收。** 持久视频库 `JsonWallpaperRepository` 和默认 Video Provider 已接入正式组合根，启动恢复已用替身桌面和 Renderer 验证；Debug/Release 各 **644/644**。没有执行真实桌面实验。默认 Host 仍因两个空生产 allowlist 失败关闭，产品内也还没有导入入口，Renderer 与 libmpv 尚未并排部署。Stage B 仍为 `In progress / Not accepted`。详见统一台账。
+
 2026-11-03 当前进度：**C1 已按约定有限范围关闭，下一步 C2 最小持久视频仓库与正式 Host 内容恢复待启动**。C1.2 单屏正式产品候选通过，C1.3 又完成播放→暂停→同 Renderer 新容器重附着→恢复→正常退出，用户确认全部符合预期；真实 ExitCode=0、完整自有清理，本轮 WorkerW 1→1、未新增，整轮退出码 0。此前 Shell mutation 的 CleanupIncomplete 和旧失败原样保留。Debug/Release 各 **573/573**。ADR-011 vo=libmpv + D3D11 Render API、v1 HwndChild、DTO/Schema 不变；未支持的 Throttle/属性/连续遥测明确拒绝，不冒充完整 Renderer 能力。默认生产 Provider/持久库、双屏/真实 Video Explorer/长期资源及编码性能矩阵、发行待完成。依赖和运行时限定项目，P1.9.2/P1.9.4 延期、Stage B 未接受及两个空生产 allowlist 保留。详见统一台账及 Video 模块能力表。
 
 2026-10-24 最新验证：**P1.9.5 已按明示边界关闭。** 停止事务、系统通知、双层持久观测、受控进程、单屏活动 Close、无 Renderer 真实注销与最后活动 Renderer 单屏真实注销均通过。退出顺序修正后的真实样本收到 ShutdownCompleted，Renderer ExitCode=0、Surface=0，配置保留，用户确认注销前正常、登录后原壁纸。修正后自动基线为 Debug/Release `428/428`、合成证据 `25/25`、受控 Host `5/5`、无 Surface Renderer `2/2`。旧失败样本原样保留，不推断未观察到的 Main 返回或实际 Host 退出码，不泛化为真实关机/重启、双屏退出或登录自启动已验收。P1.9.2 双屏系统恢复与 P1.9.4 实机延期义务仍保留，Stage B 为 `In progress / Not accepted`，两类生产 allowlist 为空。详情见统一台账的 P1.9.5-E 关闭表和真实重测记录。

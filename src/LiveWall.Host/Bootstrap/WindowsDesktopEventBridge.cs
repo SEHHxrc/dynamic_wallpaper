@@ -87,9 +87,6 @@ internal sealed class WindowsDesktopEventBridge : IWindowsEnvironmentEventBridge
         }
     }
 
-    internal DisplayTopologyForwardingFailure? LastDisplayTopologyForwardingFailure =>
-        displayTopologyForwarder.LastFailure;
-
     internal ExplorerValidationFailure? LastExplorerValidationFailure =>
         Volatile.Read(ref lastExplorerValidationFailure);
 

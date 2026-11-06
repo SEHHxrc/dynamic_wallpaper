@@ -16,7 +16,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "pattern": "^(content|web)/(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)[^\\\\:\\u0000-\\u001F]+$"
+      "pattern": "^(content|web)/(?!(?:.*/)?\\.\\.?(?:/|$))(?!.*//)[^\\\\:\\u0000-\\u001F]+$"
     },
     "preview": { "type": "string", "pattern": "^preview\\.(webp|png|jpg|jpeg)$" },
     "permissions": {

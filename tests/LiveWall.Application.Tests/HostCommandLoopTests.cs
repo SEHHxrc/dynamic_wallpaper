@@ -3569,10 +3569,11 @@ public sealed partial class HostCommandLoopTests
         public SessionCoordinator Coordinator { get; private set; } = null!;
 
         public HostCommandLoop CreateCommandLoop(
-            Func<ISessionCoordinator, ISessionCoordinator>? decorateCoordinator = null)
+            Func<ISessionCoordinator, ISessionCoordinator>? decorateCoordinator = null,
+            IWallpaperRepository? repository = null)
         {
             Coordinator = new SessionCoordinator(
-                new FakeWallpaperRepository(),
+                repository ?? new FakeWallpaperRepository(),
                 new DefaultLayoutPlanner(),
                 new RendererProviderSelector([Provider]),
                 Desktop,

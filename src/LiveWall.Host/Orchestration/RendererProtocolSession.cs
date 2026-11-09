@@ -6,14 +6,6 @@ using LiveWall.Infrastructure.Ipc;
 
 namespace LiveWall.Host.Orchestration;
 
-internal sealed class ActiveRendererFailureException(SessionId id, long generation, string errorCode)
-    : Exception($"Active Renderer failed: {errorCode}.")
-{
-    public SessionId SessionId { get; } = id;
-    public long Generation { get; } = generation;
-    public string ErrorCode { get; } = errorCode;
-}
-
 internal sealed class RendererProtocolSession : IRendererSession
 {
     private readonly LengthPrefixedJsonChannel protocolChannel;

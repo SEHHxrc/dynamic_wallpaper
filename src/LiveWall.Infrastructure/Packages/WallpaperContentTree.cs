@@ -24,9 +24,16 @@ public static class WallpaperContentTree
     /// UTF-8 path, one zero byte, 8-byte little-endian length, raw SHA-256 of the file.
     /// Returns upper-case hex.
     /// </summary>
-    public static async Task<string> ComputeHashAsync(string rootPath, CancellationToken cancellationToken)
+    public static async Task<string> ComputeHashAsync(string rootPath, CancellationToken cancellationToken) =>
+        (await ComputeDigestAsync(rootPath, cancellationToken).ConfigureAwait(false)).TreeHash;
+
+    /// <summary>The tree hash plus each file's own SHA-256, computed in one pass over the content.</summary>
+    public static async Task<ContentTreeDigest> ComputeDigestAsync(
+        string rootPath,
+        CancellationToken cancellationToken)
     {
         using IncrementalHash tree = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Dictionary<string, string> fileHashes = new(StringComparer.OrdinalIgnoreCase);
         byte[] length = new byte[sizeof(long)];
         foreach (string relativePath in EnumerateRelativeFiles(rootPath))
         {
@@ -38,9 +45,10 @@ public static class WallpaperContentTree
             tree.AppendData(new byte[1]);
             tree.AppendData(length);
             tree.AppendData(fileHash);
+            fileHashes.Add(relativePath, Convert.ToHexString(fileHash));
         }
 
-        return Convert.ToHexString(tree.GetHashAndReset());
+        return new ContentTreeDigest(Convert.ToHexString(tree.GetHashAndReset()), fileHashes);
     }
 
     /// <summary>Copies into an existing empty directory; the copy holds plain files only.</summary>
@@ -119,3 +127,7 @@ public static class WallpaperContentTree
         bufferSize: 81920,
         FileOptions.Asynchronous | FileOptions.SequentialScan);
 }
+
+/// <param name="TreeHash">Upper-case hex tree hash, as defined in docs/package-format.md.</param>
+/// <param name="FileHashes">Upper-case hex SHA-256 per forward-slash relative path (case-insensitive keys).</param>
+public sealed record ContentTreeDigest(string TreeHash, IReadOnlyDictionary<string, string> FileHashes);

@@ -2,6 +2,24 @@
 
 采集 Shell/显示器拓扑，并以受控色块模式验证候选桌面附着。不得自动修改持久设置或生产 allowlist；输出必须脱敏稳定设备路径中的用户数据。
 
+## C3.0 Renderer 崩溃恢复（2026-11-08）
+
+```powershell
+./tools/run-video-host-restore.ps1 -CrashRecovery -PreflightOnly
+./tools/run-video-host-restore.ps1 -CrashRecovery -ConfirmDesktopPresentation   # 可见，须先获得用户同意
+```
+
+底层为 `--video-host-crash-recovery`，参数与 `--video-host-restore` 相同，另加 `--crashes 1..4`（默认 2）；`--duration-seconds` 是每段观察时长，默认 6。可见运行导入源视频并 Apply，之后每段观察结束就杀掉当前 Renderer 进程，等待 Host 按 §11.5 用新进程恢复或熔断。只读预检和退出码含义与 C2.1 相同；结果写入 `artifacts/diagnostics/video-c3/crash-<随机>/result.json`。两种场景共用 `VideoHostScenarioCommand`。
+
+## C2.1 Host 重启内容恢复（2026-11-07）
+
+```powershell
+./tools/run-video-host-restore.ps1 -PreflightOnly
+./tools/run-video-host-restore.ps1 -ConfirmDesktopPresentation   # 可见，须先获得用户同意
+```
+
+底层为 `--video-host-restore`，必填 `--renderer-executable`、`--libmpv`、`--source-video`、`--run-directory`（必须是新目录）；`--duration-seconds` 是每个 Host 的观察时长，3–30 秒，默认 8。只读预检检查源视频签名、Renderer、固定的 libmpv 哈希、交互式桌面和主屏，不发 Shell 请求。可见运行把源视频导入运行目录下的新数据根，第一个 Host Apply 后停止并持久化，3 秒后第二个 Host 启动恢复。结果写入运行目录的 `result.json`；退出码 0 为完成待人工确认，6 为 Shell mutation 未恢复，8 为失败，3 为环境不满足，130 为取消。包装脚本兼容 Windows PowerShell 5.1。
+
 ## C1.2 正式 Video 产品候选（2026-10-29）
 
 构建 Release 后，从交互式桌面执行只读预检：

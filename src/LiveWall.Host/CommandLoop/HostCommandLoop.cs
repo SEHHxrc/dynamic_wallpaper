@@ -17,6 +17,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
     private const int RetainedRecoveryDiagnostics = 32;
     private const int RetainedDisplayReconciliationDiagnostics = 32;
     private const int MaximumRecoveryRebuildAttempts = 3;
+    private const int MaximumRendererRestartDeferrals = 240;
+    private static readonly TimeSpan RendererRestartDeferral = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan[] RecoveryRebuildDelays =
     [
         TimeSpan.FromMilliseconds(350),
@@ -50,6 +52,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
     private long? activeDisplayReconciliationGeneration;
     private volatile bool stopping;
     private readonly RendererPlaybackJournal playbackJournal = new();
+    private readonly TimeProvider timeProvider;
+    private readonly RendererRecoveryTracker rendererRecovery;
     private bool deferredSessionShellChange;
     private DisplayTopology? deferredSessionTopology;
     private readonly HashSet<long> sessionBlockedGenerations = [];
@@ -85,9 +89,12 @@ internal sealed class HostCommandLoop : IAsyncDisposable
     public HostCommandLoop(
         ISessionCoordinator coordinator,
         IPlaybackPolicyEvaluator playbackPolicyEvaluator,
-        ILayoutPlanner? layoutPlanner = null)
+        ILayoutPlanner? layoutPlanner = null,
+        TimeProvider? timeProvider = null)
     {
         this.coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+        rendererRecovery = new RendererRecoveryTracker(this.timeProvider);
         this.playbackPolicyEvaluator = playbackPolicyEvaluator ??
             throw new ArgumentNullException(nameof(playbackPolicyEvaluator));
         displayReconciliationPlanner = new DisplayReconciliationPlanner(
@@ -139,6 +146,9 @@ internal sealed class HostCommandLoop : IAsyncDisposable
 
     internal IReadOnlyList<PreparedSession> GetPreparedSessionsForDiagnostics() =>
         state.GetPreparedSessions();
+
+    internal IReadOnlyList<RendererRecoveryEntry> GetRendererRecoveryJournalForDiagnostics() =>
+        rendererRecovery.Journal;
 
     internal Task<ApplyGenerationResult> WaitForApplyGenerationAsync(
         long generation,
@@ -461,6 +471,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             case RetryDesktopRecoveryCommand:
             case RendererEventCommand:
             case RendererExitedCommand:
+            case RestartRendererCommand:
+            case RendererRestartCompletedCommand:
                 return HostCommandResult.Success(state.Revision, state.Snapshot());
             default:
                 return HostCommandResult.Reject(state.Revision, "host.stopping");
@@ -480,6 +492,8 @@ internal sealed class HostCommandLoop : IAsyncDisposable
             ChangePlaybackIntentCommand playback => ChangePlaybackIntent(playback, cancellationToken),
             RendererEventCommand rendererEvent => HandleRendererEvent(rendererEvent),
             RendererExitedCommand rendererExited => HandleRendererExit(rendererExited),
+            RestartRendererCommand restart => BeginRendererRestart(restart, cancellationToken),
+            RendererRestartCompletedCommand completed => CompleteRendererRestart(completed),
             ExplorerRestartedCommand => BeginDesktopRecovery(cancellationToken),
             DesktopRecoveryFailedCommand failed => FailDesktopRecovery(failed),
             RetryDesktopRecoveryCommand retry => BeginRecoveryRebuild(retry, cancellationToken),
@@ -503,7 +517,14 @@ internal sealed class HostCommandLoop : IAsyncDisposable
                 command.FitMode,
                 command.PropertyPresetId))
             .ToArray();
-        return BeginApply(assignments, cancellationToken);
+        HostCommandResult result = BeginApply(assignments, cancellationToken);
+        if (result.Accepted)
+        {
+            // An explicit Apply starts over: failure counts and open circuits for these displays end.
+            rendererRecovery.Reset(command.Displays.ToArray());
+        }
+
+        return result;
     }
 
     private HostCommandResult BeginRestore(
@@ -511,6 +532,7 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         state.RestoreAssignments(command.Assignments);
+        rendererRecovery.Reset(command.Assignments.Select(assignment => assignment.DisplayId).ToArray());
         if (state.DisplayTopology is null)
         {
             return HostCommandResult.Reject(state.Revision, "host.display.topology_unavailable");
@@ -2042,11 +2064,141 @@ internal sealed class HostCommandLoop : IAsyncDisposable
         }
 
         if (command.RendererEvent is RendererFailed failure && !desktopRecoveryInProgress &&
-            state.FindPreparedSession(command.SessionId) is { Renderer: RendererProtocolSession } active &&
+            state.FindPreparedSession(command.SessionId) is { } active &&
             active.Session.Generation == command.Generation)
         {
-            RecordBackgroundFailure(new ActiveRendererFailureException(command.SessionId, command.Generation, failure.ErrorCode));
+            // ARCHITECTURE §11.5: retire the failed session at once, then restart its displays with a fresh
+            // Renderer and Surface under the restart policy. A handled Renderer failure is not a Host fault.
             TrackRetirement(state.TakeSessions([command.SessionId]), CancellationToken.None);
+            ScheduleRendererRestart(RendererRecoveryKey.For(active.Session), command.Generation, failure.ErrorCode);
+        }
+
+        return HostCommandResult.Success(state.Revision);
+    }
+
+    private void ScheduleRendererRestart(RendererRecoveryKey key, long? generation, string reason)
+    {
+        RendererRestartDecision decision = rendererRecovery.RecordFailure(key, generation, reason);
+        if (decision.ShouldRestart)
+        {
+            TrackBackgroundTask(PostRendererRestartAsync(key, decision.Delay, deferrals: 0));
+        }
+    }
+
+    private async Task PostRendererRestartAsync(RendererRecoveryKey key, TimeSpan delay, int deferrals)
+    {
+        try
+        {
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, timeProvider, shutdown.Token).ConfigureAwait(false);
+            }
+
+            await PostInternalAsync(new RestartRendererCommand(key, deferrals), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Host shutdown ends recovery; the persisted Assignment is restored on the next start.
+        }
+    }
+
+    private HostCommandResult BeginRendererRestart(RestartRendererCommand command, CancellationToken cancellationToken)
+    {
+        RendererRecoveryKey key = command.Key;
+        WallpaperAssignment[] assignments = state.GetAssignments()
+            .Where(assignment => key.Displays.Contains(assignment.DisplayId))
+            .ToArray();
+        HashSet<DisplayId> connected = state.DisplayTopology?.Displays.Select(display => display.Id).ToHashSet() ?? [];
+        string? superseded =
+            rendererRecovery.IsCircuitOpen(key) ? "circuit-open" :
+            assignments.Length != key.Displays.Count ||
+                assignments.Any(assignment => assignment.WallpaperId != key.WallpaperId) ? "assignment-changed" :
+            !key.Displays.All(connected.Contains) ? "display-disconnected" :
+            state.GetPreparedSessions().Any(session => key.Touches(session.Session.Displays)) ? "already-presented" :
+            null;
+        if (superseded is not null)
+        {
+            rendererRecovery.Record(key, RendererRecoveryOutcome.Superseded, null, superseded);
+            return HostCommandResult.Success(state.Revision);
+        }
+
+        if (RendererRestartMustWait())
+        {
+            if (command.Deferrals >= MaximumRendererRestartDeferrals)
+            {
+                rendererRecovery.Record(key, RendererRecoveryOutcome.Abandoned, null, "host-busy");
+            }
+            else
+            {
+                TrackBackgroundTask(PostRendererRestartAsync(key, RendererRestartDeferral, command.Deferrals + 1));
+            }
+
+            return HostCommandResult.Success(state.Revision);
+        }
+
+        HostCommandResult result = BeginApply(assignments, cancellationToken);
+        if (!result.Accepted)
+        {
+            rendererRecovery.Record(key, RendererRecoveryOutcome.RestartFailed, null, result.ErrorCode);
+            ScheduleRendererRestart(key, null, result.ErrorCode ?? "host.renderer_restart.rejected");
+            return result;
+        }
+
+        rendererRecovery.BeginRestart(key, state.Generation);
+        if (FindApplyOperation(state.Generation) is { } operation)
+        {
+            TrackBackgroundTask(ObserveRendererRestartAsync(operation.Completion));
+        }
+
+        return result;
+    }
+
+    // Another operation owns the Host's sessions; starting an Apply now would supersede it.
+    private bool RendererRestartMustWait() =>
+        applyOperations.Values.Any(operation => !operation.Completion.IsCompleted) ||
+        desktopRecoveryInProgress ||
+        activeDisplayReconciliationOperation is { Completion.IsCompleted: false } ||
+        activeSessionEnvironmentOperation is { Completion.IsCompleted: false } ||
+        state.SystemState.IsSessionDisconnected;
+
+    private async Task ObserveRendererRestartAsync(Task<ApplyGenerationResult> completion)
+    {
+        try
+        {
+            ApplyGenerationResult result = await completion.WaitAsync(shutdown.Token).ConfigureAwait(false);
+            await PostInternalAsync(new RendererRestartCompletedCommand(result), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Host shutdown ends recovery.
+        }
+    }
+
+    private HostCommandResult CompleteRendererRestart(RendererRestartCompletedCommand command)
+    {
+        ApplyGenerationResult result = command.Result;
+        if (!rendererRecovery.TryCompleteRestart(result.Generation, out RendererRecoveryKey? key))
+        {
+            return HostCommandResult.Success(state.Revision);
+        }
+
+        switch (result.State)
+        {
+            case ApplyGenerationTerminalState.Succeeded:
+                rendererRecovery.Record(key, RendererRecoveryOutcome.Restarted, result.Generation, null);
+                break;
+            case ApplyGenerationTerminalState.Failed:
+                rendererRecovery.Record(key, RendererRecoveryOutcome.RestartFailed, result.Generation,
+                    result.FailureReason.ToString());
+                ScheduleRendererRestart(key, result.Generation, $"restart.{result.FailureReason}");
+                break;
+            default:
+                // Cancelled: superseded by an explicit Apply, blocked by the session, or the Host stopped.
+                rendererRecovery.Record(key, RendererRecoveryOutcome.Superseded, result.Generation,
+                    result.FailureReason.ToString());
+                break;
         }
 
         return HostCommandResult.Success(state.Revision);

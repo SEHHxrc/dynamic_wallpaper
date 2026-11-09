@@ -59,10 +59,20 @@ public sealed record ImportRequest(
 
 public sealed record ImportResult(
     bool Succeeded,
-    ImportedWallpaper? Wallpaper,
+    StagedWallpaper? Wallpaper,
     CompatibilityReport Compatibility,
     IReadOnlyList<string> Diagnostics);
 
+/// <summary>
+/// Normalized content an importer wrote into its staging directory. It is not yet pinned by a content
+/// hash; the Host computes that before handing the content to the library.
+/// </summary>
+public sealed record StagedWallpaper(
+    WallpaperDefinition Definition,
+    string StagedContentDirectory,
+    CompatibilityReport Compatibility);
+
+/// <summary>Staged content pinned by its content hash, ready for the library to verify and commit.</summary>
 public sealed record ImportedWallpaper(
     WallpaperDefinition Definition,
     string StagedContentDirectory,

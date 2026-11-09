@@ -5,6 +5,7 @@ using LiveWall.Application.Sessions;
 using LiveWall.Application.Configuration;
 using LiveWall.Host.CommandLoop;
 using LiveWall.Host.Orchestration;
+using LiveWall.Importers.Native;
 using LiveWall.Infrastructure.Configuration;
 using LiveWall.Infrastructure.Persistence;
 using LiveWall.Platform.Windows.Desktop;
@@ -23,9 +24,18 @@ internal static class WindowsHostCompositionRoot
         string configurationDirectory,
         string installationScope) =>
         new(
-            new JsonWallpaperRepository(Path.Combine(configurationDirectory, "library")),
+            CreateWallpaperRepository(configurationDirectory),
             DefaultRendererProviders.Create(installationScope, AppContext.BaseDirectory),
             DesktopAttachmentPolicy.Production);
+
+    // The data layout under the LiveWall data root lives here so diagnostics use exactly the Host's wiring.
+    internal static JsonWallpaperRepository CreateWallpaperRepository(string configurationDirectory) =>
+        new(Path.Combine(configurationDirectory, "library"));
+
+    internal static WallpaperImportCoordinator CreateImportCoordinator(
+        string configurationDirectory,
+        IWallpaperRepository repository) =>
+        new([new LocalVideoImporter()], repository, Path.Combine(configurationDirectory, "cache", "imports"));
 
     internal static WindowsHostComposition CreateComposition(
         string configurationDirectory,

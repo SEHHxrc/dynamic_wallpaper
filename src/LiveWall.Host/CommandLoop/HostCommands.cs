@@ -63,6 +63,10 @@ internal sealed record RendererEventCommand(
 
 internal sealed record RendererExitedCommand(SessionId SessionId, long Generation, int ExitCode) : HostCommand;
 
+internal sealed record RestartRendererCommand(RendererRecoveryKey Key, int Deferrals) : HostCommand;
+
+internal sealed record RendererRestartCompletedCommand(ApplyGenerationResult Result) : HostCommand;
+
 internal sealed record ApplyPreparedCommand(long Generation, PreparedApply Prepared) : HostCommand;
 
 internal sealed record ApplyPreparationFailedCommand(

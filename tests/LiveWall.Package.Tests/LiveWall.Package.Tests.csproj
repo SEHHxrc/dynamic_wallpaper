@@ -13,6 +13,7 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\src\LiveWall.Importers\LiveWall.Importers.csproj" />
     <ProjectReference Include="..\..\src\LiveWall.Infrastructure\LiveWall.Infrastructure.csproj" />
   </ItemGroup>
   <ItemGroup>

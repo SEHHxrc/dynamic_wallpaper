@@ -3570,7 +3570,8 @@ public sealed partial class HostCommandLoopTests
 
         public HostCommandLoop CreateCommandLoop(
             Func<ISessionCoordinator, ISessionCoordinator>? decorateCoordinator = null,
-            IWallpaperRepository? repository = null)
+            IWallpaperRepository? repository = null,
+            TimeProvider? timeProvider = null)
         {
             Coordinator = new SessionCoordinator(
                 repository ?? new FakeWallpaperRepository(),
@@ -3582,7 +3583,7 @@ public sealed partial class HostCommandLoopTests
                 applyDeadlineBudget,
                 retirementPolicy);
             ISessionCoordinator selected = decorateCoordinator?.Invoke(Coordinator) ?? Coordinator;
-            return new HostCommandLoop(selected, new DefaultPlaybackPolicyEvaluator());
+            return new HostCommandLoop(selected, new DefaultPlaybackPolicyEvaluator(), timeProvider: timeProvider);
         }
     }
 

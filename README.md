@@ -44,6 +44,10 @@ Bootstrap 还会生成被 Git 忽略的 `.vscode/settings.json`，让 C# 与 C# 
 
 ## 当前边界
 
+2026-11-08 当前进度：**C3.0 Renderer 崩溃恢复单屏代表验收通过。** 活动 Renderer 崩溃后，Host 按 ARCHITECTURE §11.5 依次立即、2 秒后、8 秒后用全新 Renderer 重启，60 秒内第 4 次失败熔断并保留 Assignment；已处理的崩溃不再算 Host 故障。自动测试、真实 Renderer 连杀 4 次的隐藏验证和一次获准的单屏可见实验均通过，用户确认画面符合预期；Debug/Release 各 **717/717**。熔断后的静态预览和 UI 通知尚未实现。Stage B 仍为 `In progress / Not accepted`。详见统一台账。
+
+2026-11-07 当前进度：**C2.1 单屏内容恢复代表验收通过。** 本地视频导入入口（`LocalVideoImporter` + Host 导入管线）已接入持久库；同一数据根上，第一个 Host 应用视频并停止，第二个 Host 启动时从持久配置自动恢复。隐藏验证和一次获准的单屏可见实验都通过，用户确认画面符合预期；Debug/Release 各 **709/709**。可见实验依赖显式诊断附着覆盖，生产 Host 仍因两个空 allowlist 失败关闭；UI RPC 导入、`native/` libmpv 并排部署和多屏验证待后续切片。Stage B 仍为 `In progress / Not accepted`。详见统一台账。
+
 2026-11-06 当前进度：**C2.0 代码与自动验证完成，真实内容恢复未验收。** 持久视频库 `JsonWallpaperRepository` 和默认 Video Provider 已接入正式组合根，启动恢复已用替身桌面和 Renderer 验证；Debug/Release 各 **644/644**。没有执行真实桌面实验。默认 Host 仍因两个空生产 allowlist 失败关闭，产品内也还没有导入入口，Renderer 与 libmpv 尚未并排部署。Stage B 仍为 `In progress / Not accepted`。详见统一台账。
 
 2026-11-03 当前进度：**C1 已按约定有限范围关闭，下一步 C2 最小持久视频仓库与正式 Host 内容恢复待启动**。C1.2 单屏正式产品候选通过，C1.3 又完成播放→暂停→同 Renderer 新容器重附着→恢复→正常退出，用户确认全部符合预期；真实 ExitCode=0、完整自有清理，本轮 WorkerW 1→1、未新增，整轮退出码 0。此前 Shell mutation 的 CleanupIncomplete 和旧失败原样保留。Debug/Release 各 **573/573**。ADR-011 vo=libmpv + D3D11 Render API、v1 HwndChild、DTO/Schema 不变；未支持的 Throttle/属性/连续遥测明确拒绝，不冒充完整 Renderer 能力。默认生产 Provider/持久库、双屏/真实 Video Explorer/长期资源及编码性能矩阵、发行待完成。依赖和运行时限定项目，P1.9.2/P1.9.4 延期、Stage B 未接受及两个空生产 allowlist 保留。详见统一台账及 Video 模块能力表。

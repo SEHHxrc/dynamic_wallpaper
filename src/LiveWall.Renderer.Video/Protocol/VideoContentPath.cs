@@ -4,7 +4,8 @@ namespace LiveWall.Renderer.Video.Protocol;
 
 internal static class VideoContentPath
 {
-    private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
+    // Mirrors the Domain's NativeVideoFormats; the Renderer only references Contracts, so a contract test keeps them equal.
+    internal static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
         { ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".gif" };
 
     public static string Resolve(LoadWallpaperPayload load)

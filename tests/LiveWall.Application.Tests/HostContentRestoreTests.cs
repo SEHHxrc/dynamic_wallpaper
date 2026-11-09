@@ -117,6 +117,125 @@ public sealed partial class HostCommandLoopTests
         DefaultRendererProviders.ResolveLocale(CultureInfo.GetCultureInfo("zh-CN")).Should().Be("zh-CN");
     }
 
+    [Fact]
+    public async Task ARestartedHostRestoresTheImportedVideoFromThePersistedDataRoot()
+    {
+        using LibraryFixture fixture = new();
+        string source = WriteLocalVideo(fixture.RootPath, "Restore Clip.mp4");
+        FakeRendererProvider provider = new([true, true]);
+        FakeDesktopHost desktop = new();
+        List<HostContentRestorePhase> committed = [];
+        List<HostContentRestorePhase> stopped = [];
+
+        HostContentRestoreResult result = await RunRestoreAsync(
+            fixture, source, provider, desktop, (phase, _) => committed.Add(phase), stopped.Add);
+
+        result.Failure.Should().BeNull();
+        result.Valid.Should().BeTrue();
+        committed.Should().Equal(HostContentRestorePhase.Applied, HostContentRestorePhase.Restored);
+        stopped.Should().Equal(HostContentRestorePhase.Applied, HostContentRestorePhase.Restored);
+        WallpaperId wallpaperId = result.Import.WallpaperId!.Value;
+        LocalVideoIdentity.IsReserved(wallpaperId).Should().BeTrue();
+        provider.SessionCount.Should().Be(2);
+        for (int index = 0; index < 2; index++)
+        {
+            FakeRendererSession session = await provider.WaitForSessionAsync(index, CancellationToken.None);
+            LoadRendererContent load = session.Commands.OfType<LoadRendererContent>().Single();
+            load.CanonicalContentRoot.Should().Be(result.ContentRoot);
+            load.Wallpaper.Id.Should().Be(wallpaperId);
+            session.ShutdownCompletedCount.Should().Be(1);
+        }
+
+        desktop.Replacements.Should().HaveCount(2);
+        result.Phases.Should().AllSatisfy(phase =>
+        {
+            phase.GenerationResult!.State.Should().Be(ApplyGenerationTerminalState.Succeeded);
+            phase.Sessions.Should().ContainSingle();
+            phase.Retirement.Sessions.Should().ContainSingle().Which.Graceful.Should().BeTrue();
+            phase.PersistedAssignments.Should().ContainSingle().Which.WallpaperId.Should().Be(wallpaperId);
+        });
+    }
+
+    [Fact]
+    public async Task HostRestoreStartsNoHostWhenTheSourceCannotBeImported()
+    {
+        using LibraryFixture fixture = new();
+        string source = Path.Combine(fixture.RootPath, "notes.txt");
+        await File.WriteAllTextAsync(source, "not a video");
+        FakeRendererProvider provider = new([true]);
+
+        HostContentRestoreResult result = await RunRestoreAsync(fixture, source, provider, new FakeDesktopHost());
+
+        result.Valid.Should().BeFalse();
+        result.Import.Succeeded.Should().BeFalse();
+        result.Phases.Should().BeEmpty();
+        provider.SessionCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task AFailedStartupRestoreIsReportedAndKeepsThePersistedAssignment()
+    {
+        using LibraryFixture fixture = new();
+        string source = WriteLocalVideo(fixture.RootPath, "clip.mp4");
+        FakeRendererProvider provider = new([true, true]);
+
+        HostContentRestoreResult result = await RunRestoreAsync(fixture, source, provider, new FakeDesktopHost(),
+            (phase, _) =>
+            {
+                if (phase == HostContentRestorePhase.Applied)
+                {
+                    provider.ConfigureSession = session => session.FailAttachOnCount = 1;
+                }
+            });
+
+        result.Valid.Should().BeFalse();
+        result.Phases.Should().HaveCount(2);
+        result.Phases[0].Succeeded.Should().BeTrue();
+        HostContentRestorePhaseResult restored = result.Phases[1];
+        restored.Succeeded.Should().BeFalse();
+        restored.GenerationResult!.State.Should().Be(ApplyGenerationTerminalState.Failed);
+        restored.PersistedAssignments.Should().ContainSingle()
+            .Which.WallpaperId.Should().Be(result.Import.WallpaperId!.Value);
+    }
+
+    [Fact]
+    public async Task HostRestoreRequiresAFreshRunDirectory()
+    {
+        using LibraryFixture fixture = new();
+        Directory.CreateDirectory(Path.Combine(fixture.RootPath, "run"));
+
+        Func<Task> run = () => RunRestoreAsync(
+            fixture, WriteLocalVideo(fixture.RootPath, "clip.mp4"), new FakeRendererProvider([true]), new FakeDesktopHost());
+
+        await run.Should().ThrowAsync<ArgumentException>();
+    }
+
+    private static Task<HostContentRestoreResult> RunRestoreAsync(
+        LibraryFixture fixture,
+        string source,
+        FakeRendererProvider provider,
+        FakeDesktopHost desktop,
+        Action<HostContentRestorePhase, IReadOnlyList<ProductCandidateSessionResult>>? committed = null,
+        Action<HostContentRestorePhase>? stopped = null) =>
+        HostContentRestoreDiagnostics.RunAsync(
+            new HostContentRestoreRequest(
+                Path.Combine(fixture.RootPath, "run"),
+                source,
+                TimeSpan.FromMilliseconds(20),
+                TimeSpan.Zero,
+                committed,
+                stopped),
+            (configuration, repository) => HostContentRestoreDiagnostics.CreateIsolatedRuntime(
+                configuration, repository, [provider], desktop, CreateTopology()),
+            CancellationToken.None);
+
+    private static string WriteLocalVideo(string directory, string name)
+    {
+        string path = Path.Combine(directory, name);
+        File.WriteAllBytes(path, [0, 0, 0, 0x18, .. "ftypisom"u8, 0, 0, 0, 0, .. RandomNumberGenerator.GetBytes(256)]);
+        return path;
+    }
+
     private static async Task AssertRestoreFailsClosedAsync(LibraryFixture library)
     {
         TestRuntime runtime = new(true);

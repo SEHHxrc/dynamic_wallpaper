@@ -10,3 +10,4 @@ C1.1 新增 37 项真实长度帧/Pipe + 受控后端测试：完整 Wire 顺序
 
 C1.3 新增 7 项：Pause/Resume/Suspend 的后端即使忽略取消并迟到完成，Shutdown 后也不能回传播放成功；未实现的 Throttle、SetProperties、SetAudioFrame、CapturePreview 明确拒绝。本项目当前 121 项，不加载真实 DLL/窗口；真实媒体时间、画幅/音量读回及 Host 失败收口由 VideoPresentationProbe 的独立隐藏案例记录。
 
+C2.1 新增 1 项：Renderer 接受的视频入口扩展名必须与 Domain 的 `NativeVideoFormats` 完全一致。

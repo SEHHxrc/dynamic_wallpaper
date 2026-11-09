@@ -23,12 +23,6 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
     private const string TrashDirectoryName = ".trash";
     private const long MaximumIndexBytes = 16 * 1024 * 1024;
 
-    // Must stay within the set accepted by the Video Renderer's content path check.
-    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".mp4", ".webm", ".mkv", ".avi", ".mov", ".m4v", ".gif",
-    };
-
     private static readonly JsonSerializerOptions SerializerOptions = StrictJson.CreateOptions();
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly string libraryRoot;
@@ -93,7 +87,9 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
 
     /// <summary>
     /// Validates and hashes a private copy, so later changes to the staged source cannot reach the
-    /// library. Re-saving identical content is a no-op; a version is immutable once committed.
+    /// library. Re-saving identical content is a no-op; a readable version is immutable once committed,
+    /// while an unreadable one is replaced, so importing it again repairs it. A reserved local video id
+    /// is only accepted when its media really has the hash the id carries.
     /// </summary>
     public async Task SaveImportedAsync(ImportedWallpaper wallpaper, CancellationToken cancellationToken)
     {
@@ -122,8 +118,9 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
                     staging,
                     cancellationToken)
                 .ConfigureAwait(false);
-            string contentHash = await WallpaperContentTree.ComputeHashAsync(staging, cancellationToken)
+            ContentTreeDigest digest = await WallpaperContentTree.ComputeDigestAsync(staging, cancellationToken)
                 .ConfigureAwait(false);
+            string contentHash = digest.TreeHash;
             if (!contentHash.Equals(wallpaper.ContentHash, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException("Wallpaper content does not match its declared hash.");
@@ -140,6 +137,7 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
                 throw new InvalidDataException("Wallpaper manifest does not match its definition.");
             }
 
+            VerifyReservedIdentity(manifest, declared.Origin, digest);
             await CommitAsync(wallpaper, staging, contentHash, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -184,10 +182,14 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
             WallpaperDefinition definition = wallpaper.Definition;
             IndexEntry? previous = index.FirstOrDefault(value => value.Id == definition.Id.Value);
             // Versions differing only by case share one directory on NTFS, so they are the same version.
-            if (previous is not null &&
-                previous.Version.Equals(definition.Version, StringComparison.OrdinalIgnoreCase))
+            bool sameVersion = previous is not null &&
+                previous.Version.Equals(definition.Version, StringComparison.OrdinalIgnoreCase);
+            if (sameVersion && await TryOpenEntryAsync(previous!, cancellationToken).ConfigureAwait(false) is not null)
             {
-                if (previous.ContentHash.Equals(contentHash, StringComparison.OrdinalIgnoreCase))
+                // Both copies of a reserved local video id were verified against the same media hash, so
+                // only metadata such as the title can differ; the first import keeps its metadata.
+                if (previous!.ContentHash.Equals(contentHash, StringComparison.OrdinalIgnoreCase) ||
+                    LocalVideoIdentity.IsReserved(definition.Id))
                 {
                     return;
                 }
@@ -198,7 +200,8 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
             string destination = ResolveContentRoot(definition.Id.Value, definition.Version);
             if (Directory.Exists(destination))
             {
-                // Not indexed, so this is leftover content from an interrupted commit or removal.
+                // Either leftover content from an interrupted commit or removal, or the same version
+                // that can no longer be read and is being repaired.
                 Directory.Delete(destination, recursive: true);
             }
 
@@ -224,7 +227,7 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
                 throw;
             }
 
-            if (previous is not null)
+            if (previous is not null && !sameVersion)
             {
                 DiscardContent(previous);
             }
@@ -232,6 +235,27 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
         finally
         {
             gate.Release();
+        }
+    }
+
+    private static void VerifyReservedIdentity(
+        WallpaperManifest manifest,
+        WallpaperOrigin origin,
+        ContentTreeDigest digest)
+    {
+        if (!LocalVideoIdentity.IsReserved(manifest.Id))
+        {
+            return;
+        }
+
+        if (!LocalVideoIdentity.TryGetMediaHash(manifest.Id, out string? mediaHash) ||
+            manifest.Version != LocalVideoIdentity.Version ||
+            origin != WallpaperOrigin.Native ||
+            !LocalVideoIdentity.IsEntryPoint(manifest.EntryPoint) ||
+            !digest.FileHashes.TryGetValue(manifest.EntryPoint, out string? entryHash) ||
+            !entryHash.Equals(mediaHash, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("A reserved local video identity must match its media.");
         }
     }
 
@@ -294,6 +318,11 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
     {
         CanonicalPathResolver resolver = new(contentRoot);
         string manifestPath = resolver.ResolvePackagePath(WallpaperManifestReader.FileName);
+        if (!File.Exists(manifestPath))
+        {
+            throw new InvalidDataException("Wallpaper manifest is missing.");
+        }
+
         if (new FileInfo(manifestPath).Length > WallpaperManifestReader.MaximumManifestBytes)
         {
             throw new InvalidDataException("Manifest exceeds the size limit.");
@@ -302,7 +331,7 @@ public sealed class JsonWallpaperRepository : IWallpaperRepository, IDisposable
         byte[] json = await File.ReadAllBytesAsync(manifestPath, cancellationToken).ConfigureAwait(false);
         WallpaperManifest manifest = WallpaperManifestReader.Parse(json);
         if (manifest.Kind != WallpaperKind.Video ||
-            !VideoExtensions.Contains(Path.GetExtension(manifest.EntryPoint)))
+            !NativeVideoFormats.EntryExtensions.Contains(Path.GetExtension(manifest.EntryPoint)))
         {
             throw new InvalidDataException("The library currently accepts video content only.");
         }

@@ -55,6 +55,10 @@ internal static class Program
                 return VideoCandidatePreflight.Run(productRenderer, productDll, productFixture, productResult);
             if (args is ["--host-control-preflight", string controlRenderer, string controlDll, string controlFixture, string controlOutput, string controlScenario])
                 return VideoHostControlPreflight.Run(controlRenderer, controlDll, controlFixture, controlOutput, controlScenario);
+            if (args is ["--host-restore-preflight", string restoreRenderer, string restoreDll, string restoreVideo, string restoreOutput])
+                return VideoHostRestorePreflight.Run(restoreRenderer, restoreDll, restoreVideo, restoreOutput);
+            if (args is ["--host-crash-recovery-preflight", string crashRenderer, string crashDll, string crashVideo, string crashOutput])
+                return VideoHostCrashRecoveryPreflight.Run(crashRenderer, crashDll, crashVideo, crashOutput);
             // Deliberately separate from product Program, Apply/Replace and protocol v1 sessions.
             if (args is ["--desktop", string library, string hash, string content, string result,
                 "--duration-seconds", string duration, "--confirm-desktop-presentation"] &&

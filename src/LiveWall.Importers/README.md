@@ -16,7 +16,7 @@
 
 | 目录 | 功能 | 输出 |
 |---|---|---|
-| `Native` | 原生目录与 `.lwpkg` 导入 | Native 兼容等级 |
+| `Native` | 本地视频文件（已实现），原生目录与 `.lwpkg` 导入（待实现） | Native 兼容等级 |
 | `WallpaperEngine/ProjectDirectory` | `project.json` 分类 | 视频/Web 导入计划 |
 | `WallpaperEngine/Pkg` | `.pkg` 容器索引与安全提取 | PackageIndex/素材，不直接运行 |
 | `WallpaperEngine/Mpkg` | `.mpkg` 容器索引与移动素材提取 | 视频、图片或降级结果 |

@@ -1,6 +1,6 @@
 # 实现与验收状态
 
-> 截止日期：2026-11-06。本文只记录可变的工程状态，不改变 `ARCHITECTURE.md`、已接受 ADR 或专题设计中的规范边界。
+> 截止日期：2026-11-08。本文只记录可变的工程状态，不改变 `ARCHITECTURE.md`、已接受 ADR 或专题设计中的规范边界。
 
 ## 状态口径
 
@@ -9,7 +9,72 @@
 - **真实桌面验收通过**：已在声明支持的 Windows 完整 build、显示器和 DPI 矩阵中验证图标层级、恢复与清理。
 - **未接受**：不得用于生产能力声明，也不得加入 build allowlist。
 
-## 当前阶段：C2.0 代码与自动验证完成，真实内容恢复未验收（2026-11-06）
+## 当前阶段：C3.0 Renderer 崩溃恢复单屏代表验收通过（2026-11-08）
+
+### C3.0：Renderer 崩溃恢复（ARCHITECTURE §11.5，2026-11-08）
+
+**代码、自动、隐藏验证和一次获准的单屏可见代表验收都已通过。**
+
+| 项 | 状态 |
+|---|---|
+| 活动 Renderer 报告失败或进程退出（`renderer.process.exited`）时，Host 立即让该会话退休，并按“壁纸 + 显示器”在 60 秒窗口内计数：第 1 次立即重启，第 2 次 2 秒后，第 3 次 8 秒后，第 4 次熔断。沿用已有的纯函数 `RendererRestartPolicy` | 已实现、自动验证通过 |
+| 重启走普通 Apply 路径：全新 Renderer 进程和隐藏 provisional Surface，首帧后 Replace；只重建崩溃会话覆盖的显示器，其他屏的会话保持不动 | 已实现、自动验证通过 |
+| 重启尝试本身失败（启动、附着、首帧或 Replace）同样计一次失败；被显式 Apply 取代、显示器已断开或分配已改变时记为 Superseded，不计数 | 已实现、自动验证通过 |
+| 有其他 Apply、桌面恢复、显示重规划或会话环境操作在途时，重启每 500 ms 重试，最长约 2 分钟后放弃（Abandoned） | 已实现；只做了代码审查，没有专门的自动测试 |
+| 显式 Apply 或启动恢复会清零对应显示器的计数并关闭熔断；熔断后保留 Assignment，桌面回到系统壁纸 | 已实现、自动验证通过 |
+| 已处理的 Renderer 失败不再记为 Host 后台故障，Host 退出码不会因 Renderer 崩溃变成 1；`ActiveRendererFailureException` 已删除 | 已实现、自动验证通过 |
+| 重启延迟和失败计时走可注入的 `TimeProvider`（默认系统时钟）；`GetRendererRecoveryJournalForDiagnostics` 记录每一步决定 | 已实现 |
+
+| 验证 | 结果 |
+|---|---|
+| 自动测试 | 新增 8 项（`RendererCrashRecoveryTests`，手动时钟）：立即重启；2/8 秒退避后熔断；60 秒窗口过期后重新计数；失败的重启尝试计数；显式 Apply 关闭熔断；双屏只重启崩溃那块屏；待定重启被显式 Apply 取代；关闭时结束待定重启且不报 Host 故障 |
+| 隐藏：真实 Renderer 连杀 4 次（`VideoPresentationProbe --host-crash-recovery-preflight`） | valid=True；排定延迟 0/2/8 秒，实际恢复 0.58/2.56/8.57 秒，每次换新进程，被杀进程退出码 -1；第 4 次熔断，无 Renderer 残留，隐藏窗口全部清理，分配保留；`artifacts/diagnostics/video-c3/hidden-crash-20261108-020411/` |
+| 隐藏：`process-exit`、`pipe-disconnect` 按新语义改写 | 均退出码 0：失败会话退休（无 ShutdownCompleted、资源已清理），立即用新 Renderer 和新 Surface 重启，Renderer 退出码 [-1, 0]，命令循环关闭时不再报 Host 故障 |
+| 隐藏回归：controls、candidate-plan、load-failure、first-frame-timeout、C2.1 重启恢复预检 | 均退出码 0 |
+| 只读桌面预检（`tools/run-video-host-restore.ps1 -CrashRecovery -PreflightOnly`） | ready=True，未发 Shell 请求 |
+| 获准可见（`-CrashRecovery -ConfirmDesktopPresentation`，杀 2 次，每段观察 6 秒） | `video-c3/crash-f2782ca7dd92426f996d3d0ae593df58/result.json`，SHA256=`00F9DA0336F1689280C3D0E8985D3FB8F7D00EA3E59A703B9094FA7BA758A300`。首次 Apply 约 1.37 s；第 1 次立即重启，约 1.29 s 恢复；第 2 次按 2 秒退避，约 3.28 s 恢复；每次都是新进程。被杀会话退休时 Shutdown 因管道断开而失败，但 Renderer 与 Surface 均已清理；最后一个进程 ExitCode=0；分配为真实主屏 PerDisplay/Cover；WorkerW 1→1、NotRequired，无自有窗口残留，整轮退出码 0 |
+| 人工观察 | 用户确认全部符合预期 |
+
+环境为 `26200.9711 / session=4 / WinSta0\Default / 2880×1800 / 200%`。Debug/Release 各 **717/717**（Domain 28、Application 336、Renderer Contracts 122、Package 123、Windows 108），均 0 警告 0 错误；Release 工具与 Host 已显式重建。Renderer v1 协议和 DTO/Schema 不变。
+
+未实现或未覆盖，不得记为通过：
+
+1. 熔断后应“显示静态预览并通知 UI”：目前没有 Image Renderer 和预览资源，也没有 UI RPC，熔断后只显示系统壁纸并写入恢复日志。
+2. `IProcessSupervisor` 仍未实现；进程退出由 `RendererProtocolSession` 检测并报告为 `renderer.process.exited`，`RendererExitedCommand` 仍没有发送方。
+3. 启动恢复或用户 Apply 在提交前 Renderer 就起不来时不会自动重试，仍按失败关闭、保留 Assignment。
+4. Host 忙时的推迟/放弃路径只有代码审查；双屏崩溃只有替身测试，真实双屏未测；失败计数只在内存中，Host 重启后清零。
+
+### C2.1：本地视频导入与 Host 重启内容恢复（2026-11-07）
+
+**代码、自动、隐藏验证和一次获准的单屏可见代表验收都已通过；生产默认链仍不可达（见本节末尾）。**
+
+| 项 | 状态 |
+|---|---|
+| `LocalVideoImporter`（Importers/Native）：按文件头魔数识别 MP4/M4V/MOV/WebM/MKV/AVI/GIF，扩展名必须与签名一致；只接受盘符本地路径，拒绝 UNC、设备路径、相对路径、备用数据流、网络盘和自身为重解析点的文件；在复制所用的同一句柄上复核签名，复制期间禁止他人写入 | 已实现、自动验证通过 |
+| 生成 `wallpaper.json` 与 `content/video.<ext>`；id 为 `local.video.<媒体 SHA-256>`，同一媒体总是得到同一壁纸；标题取文件名，并去掉控制、格式和行分隔字符 | 已实现、自动验证通过 |
+| `WallpaperImportCoordinator`（Host）：探测选出导入器 → 私有 staging（`cache/imports/<随机>`）→ 固定内容哈希 → 交给仓库校验提交；staging 总会删除，首次导入前清理上个进程的遗留 | 已实现、自动验证通过；尚无 RPC/UI 调用方 |
+| 仓库：`local.video.` 前缀保留，只有入口媒体哈希等于 id 后缀、版本为 1.0.0、入口为 `content/video.<ext>` 且来源为 Native 时才接受；同一本地视频换标题再导入视为重复，保留首次元数据；不可读的已提交版本可以靠重新导入修复；缺少 manifest 归为内容无效 | 已实现、自动验证通过 |
+| 视频入口扩展名集中到 Domain 的 `NativeVideoFormats`，契约测试保证与 Renderer 自己的副本一致 | 已实现、自动验证通过 |
+| `HostContentRestoreDiagnostics`：在新数据根导入 → 第一个 Host Apply，停止时持久化 → 第二个 Host 只靠启动恢复显示同一视频。两个 Host 都是真实 `WindowsHostRuntime` + JSON 配置 + 持久库 + 默认 Video Provider，隐藏与可见只换桌面组合 | 隐藏与可见均通过 |
+
+| 验证 | 结果 |
+|---|---|
+| 隐藏：真实 Video Renderer + 隐藏容器（`VideoPresentationProbe --host-restore-preflight`） | valid=True；导入 id 与夹具已知媒体哈希一致；两个 Host 各自一次首帧后 Replace，Renderer ExitCode=0，优雅退休，分配持久化；`artifacts/diagnostics/video-c2/hidden-restore-20261107-190936/` |
+| 隐藏回归：controls、candidate-plan（隐藏桌面提为共享类之后） | 均退出码 0 |
+| 生产 Host 失败关闭冒烟 | 复制隐藏运行的数据根，把分配改指向真实主屏，运行 Release `LiveWall.Host.exe --validate-startup`：退出码 0，分配内容保留，Shell 直接子 WorkerW 1→1，无 LiveWall 窗口和 Renderer 进程。Host 没有日志，恢复终态未直接记录 |
+| 只读桌面预检（`tools/run-video-host-restore.ps1 -PreflightOnly`） | ready=True，未发 Shell 请求、未建 Surface/Renderer |
+| 获准可见（`-ConfirmDesktopPresentation`，每个 Host 观察 8 秒，中间停 3 秒） | `video-c2/restore-58c0496fb66e41b38fc5bfec546364da/result.json`，SHA256=`6A10F4EF27487EC645EB167FC767BBBF07E9294A84D1EC3C34BEC67988727528`。两个 Host 的 generation 1 均 Succeeded（约 1.35 s / 1.23 s）；两个不同 Renderer 进程均 ExitCode=0，优雅退休约 0.37 s / 0.42 s；持久分配为真实主屏 PerDisplay/Cover；层级为 DefView 之下、WorkerW 之上；WorkerW 1→1、added=0、NotRequired，无自有窗口残留，整轮退出码 0 |
+| 人工观察 | 用户确认全部符合预期：视频铺满主屏约 8 秒 → 原壁纸几秒 → 同一视频再次出现约 8 秒 → 回到原壁纸，图标、任务栏和窗口层级正常，无黑屏或半屏 |
+
+环境为 `26200.9711 / session=4 / WinSta0\Default / 2880×1800 / 200%`。Debug/Release 各 **709/709**（Domain 28、Application 328、Renderer Contracts 122、Package 123、Windows 108），均 0 警告 0 错误；Release 工具与 Host 已显式重建。边界检查用内存中的 5.1 兼容副本运行，只报 `.claude`、`.github`、`.github/workflows` 三个仓库根非源码目录缺 README。Renderer v1 协议和 DTO/Schema 不变。
+
+仍不可达或未覆盖，不得记为通过：
+
+1. 两个生产 allowlist 仍为空，生产 Host 照旧在 Shell 请求前失败关闭；可见实验依赖显式的诊断附着覆盖。
+2. 导入只有 Host 内部管线和诊断入口；UI RPC 的 `ProbeImport`/`ImportWallpaper`/`CancelImport`、导入进度和 `LibraryChanged` 推送尚未实现。
+3. 默认 Provider 已按“Renderer 目录并排”解析并启动真实 Renderer；libmpv 仍通过进程环境指向开发缓存，`native/libmpv-2.dll` 并排解析和发行布局留给打包切片。
+4. 只验证了单屏和 AVI 夹具；双屏/Span、其他容器的真实解码、4K/硬解和长时间资源都未测。源文件自身为符号链接时的拒绝没有自动测试，本机无权限创建文件符号链接。
+5. Web/Image 和 `.lwpkg` 仍未实现。
 
 ### C2.0：最小持久视频库与默认 Video Provider（2026-11-06）
 
@@ -27,7 +92,7 @@
 
 Debug/Release 各 **644/644**（Domain 12、Application 316、Renderer Contracts 121、Package 87、Windows 108），均 0 警告 0 错误；日志在 `artifacts/diagnostics/c2/`。Renderer v1 协议和 DTO 不变。
 
-**真实恢复尚不可达**，以下均未解决，不得记为通过：
+**真实恢复尚不可达**，以下均未解决，不得记为通过（2026-11-07 C2.1 已部分处理第 2、3 项，见上）：
 
 1. 两个生产 allowlist 仍为空，默认 Host 在 `EnsureTopologyAsync` 失败关闭（Adapter 的 `IsSupported` 为 false，不发送 Shell 请求），内容恢复终态为 TopologyFailed。是否及如何启用受 ADR-010 与 Stage B 门禁约束，C2 不改动。
 2. 还没有写入库的入口：`SaveImportedAsync` 没有 Importer、RPC 或工具调用方，产品内无法导入视频。

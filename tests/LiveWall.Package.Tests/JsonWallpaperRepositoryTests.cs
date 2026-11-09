@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using FluentAssertions;
 using LiveWall.Application.Importing;
 using LiveWall.Application.Library;
@@ -391,6 +392,84 @@ public sealed class JsonWallpaperRepositoryTests : IDisposable
         (await WallpaperContentTree.ComputeHashAsync(edited, CancellationToken.None)).Should().NotBe(hash);
     }
 
+    [Fact]
+    public async Task AnUnreadableCommittedVersionIsRepairedByImportingItAgain()
+    {
+        await repository.SaveImportedAsync(await StageAsync(), CancellationToken.None);
+        File.Delete(Path.Combine(libraryPath, Id, "1.0.0", "content", "wallpaper.mp4"));
+
+        await repository.SaveImportedAsync(await StageAsync(media: [4, 5]), CancellationToken.None);
+
+        WallpaperLibraryEntry? entry = await repository.FindAsync(new WallpaperId(Id), CancellationToken.None);
+        entry.Should().NotBeNull();
+        File.ReadAllBytes(Path.Combine(entry!.CanonicalContentRoot, "content", "wallpaper.mp4")).Should().Equal(4, 5);
+    }
+
+    [Fact]
+    public async Task AReservedLocalVideoIdentityIsAcceptedWithItsOwnMedia()
+    {
+        byte[] media = [9, 8, 7];
+        string id = LocalVideoIdentity.FromMediaHash(Convert.ToHexString(SHA256.HashData(media))).Value;
+
+        await repository.SaveImportedAsync(await StageLocalAsync(id, media), CancellationToken.None);
+
+        (await repository.FindAsync(new WallpaperId(id), CancellationToken.None)).Should().NotBeNull();
+    }
+
+    [Theory]
+    [InlineData("other-media", "1.0.0", "content/video.mp4", WallpaperOrigin.Native)]
+    [InlineData("matching", "2.0.0", "content/video.mp4", WallpaperOrigin.Native)]
+    [InlineData("matching", "1.0.0", "content/clip.mp4", WallpaperOrigin.Native)]
+    [InlineData("matching", "1.0.0", "content/video.mp4", WallpaperOrigin.WallpaperEngineProject)]
+    [InlineData("short-suffix", "1.0.0", "content/video.mp4", WallpaperOrigin.Native)]
+    public async Task AForgedReservedLocalVideoIdentityIsRejected(
+        string suffix,
+        string version,
+        string entry,
+        WallpaperOrigin origin)
+    {
+        byte[] media = [9, 8, 7];
+        string id = suffix switch
+        {
+            "matching" => LocalVideoIdentity.FromMediaHash(Convert.ToHexString(SHA256.HashData(media))).Value,
+            "other-media" => LocalVideoIdentity.FromMediaHash(Convert.ToHexString(SHA256.HashData([1, 2]))).Value,
+            _ => LocalVideoIdentity.Prefix + "abc",
+        };
+
+        Func<Task> save = async () => await repository.SaveImportedAsync(
+            await StageLocalAsync(id, media, version: version, entry: entry, origin: origin),
+            CancellationToken.None);
+
+        await save.Should().ThrowAsync<InvalidDataException>();
+        (await repository.FindAsync(new WallpaperId(id), CancellationToken.None)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task TheSameLocalVideoUnderAnotherTitleIsADuplicateThatKeepsTheFirstTitle()
+    {
+        byte[] media = [9, 8, 7];
+        string id = LocalVideoIdentity.FromMediaHash(Convert.ToHexString(SHA256.HashData(media))).Value;
+        await repository.SaveImportedAsync(await StageLocalAsync(id, media, title: "First"), CancellationToken.None);
+
+        await repository.SaveImportedAsync(await StageLocalAsync(id, media, title: "Second"), CancellationToken.None);
+
+        WallpaperLibraryEntry? entry = await repository.FindAsync(new WallpaperId(id), CancellationToken.None);
+        entry!.Definition.Metadata.Title.Should().Be("First");
+    }
+
+    [Fact]
+    public async Task ContentDigestReportsEachFileHashAlongsideTheTreeHash()
+    {
+        string root = await WriteTreeAsync("digest", ("a.bin", [1]), ("b/c.bin", [2]));
+
+        ContentTreeDigest digest = await WallpaperContentTree.ComputeDigestAsync(root, CancellationToken.None);
+
+        digest.TreeHash.Should().Be(await WallpaperContentTree.ComputeHashAsync(root, CancellationToken.None));
+        digest.FileHashes.Should().HaveCount(2);
+        digest.FileHashes["a.bin"].Should().Be(Convert.ToHexString(SHA256.HashData([1])));
+        digest.FileHashes["B/C.BIN"].Should().Be(Convert.ToHexString(SHA256.HashData([2])));
+    }
+
     public void Dispose()
     {
         repository.Dispose();
@@ -433,6 +512,15 @@ public sealed class JsonWallpaperRepositoryTests : IDisposable
 
         return root;
     }
+
+    private Task<ImportedWallpaper> StageLocalAsync(
+        string id,
+        byte[] media,
+        string title = "clip",
+        string version = LocalVideoIdentity.Version,
+        string entry = "content/video.mp4",
+        WallpaperOrigin origin = WallpaperOrigin.Native) =>
+        StageAsync(id: id, version: version, entry: entry, mediaPath: entry, title: title, media: media, origin: origin);
 
     private async Task<ImportedWallpaper> StageAsync(
         string id = Id,

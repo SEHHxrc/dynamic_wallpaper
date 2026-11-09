@@ -31,7 +31,7 @@ internal static class VideoHostControlPreflight
             throw new ArgumentException("Use a fresh absolute evidence directory.", nameof(directory));
         VideoProductCandidateAssets assets = VideoProductCandidateAssets.Load(content, library);
         Directory.CreateDirectory(directory);
-        using HiddenDesktop desktop = new();
+        using HiddenHostDesktop desktop = new();
         using CancellationTokenSource budget = new(TimeSpan.FromSeconds(65));
         Task<object> run = Task.Run(() => RunAsync(renderer, assets, directory, scenario, desktop, budget.Token));
         while (!run.IsCompleted) { desktop.Pump(); Thread.Sleep(2); }
@@ -50,7 +50,7 @@ internal static class VideoHostControlPreflight
     }
 
     private static async Task<object> RunAsync(string executable, VideoProductCandidateAssets assets, string directory,
-        string scenario, HiddenDesktop desktop, CancellationToken token)
+        string scenario, HiddenHostDesktop desktop, CancellationToken token)
     {
         using Launcher launcher = new();
         RendererProcessProvider native = new(new(new(new RendererId("video"), "LiveWall Video",
@@ -75,16 +75,16 @@ internal static class VideoHostControlPreflight
         object? controls = null;
         object? expectedFailure = null;
         SessionRetirementBatchResult? retirement = null;
-        ActiveRendererFailureException[] observedHostFailures = [];
         try
         {
             ApplyGenerationResult initial = await Apply(good.Definition.Id);
             Require(initial.State == ApplyGenerationTerminalState.Succeeded && desktop.Replacements == 1, "Initial product Apply failed.");
             PreparedSession active = host.GetPreparedSessionsForDiagnostics().Single();
             RendererProtocolSession renderer = (RendererProtocolSession)active.Renderer;
+            int oldProcessId = renderer.ProcessId; // The handle is released once the session retires.
             ulong oldHost = active.Surfaces.Single().Surface.WindowHandle;
             ulong oldChild = ProbeWindow.FirstChild(oldHost);
-            Require(ProbeWindow.ChildMatches(oldChild, oldHost, renderer.ProcessId, 320, 180), "Initial child identity mismatch.");
+            Require(ProbeWindow.ChildMatches(oldChild, oldHost, oldProcessId, 320, 180), "Initial child identity mismatch.");
             string trace = Path.Combine(directory, "native-1-1.jsonl");
             if (scenario == "candidate-plan")
             {
@@ -171,13 +171,22 @@ internal static class VideoHostControlPreflight
                 else await renderer.DisconnectForDiagnosticsAsync();
                 RendererFailed failed = await renderer.ActiveFailure.WaitAsync(token);
                 await destroyed.WaitAsync(token); // Host observes failure and retires without a diagnostic command.
-                await host.WaitForPendingRetirementsForDiagnosticsAsync(token);
+                // ARCHITECTURE §11.5: the first failure restarts at once with a fresh Renderer and Surface.
+                RendererRecoveryEntry restarted = await Recovery(RendererRecoveryOutcome.Restarted, token);
+                await host.WaitForSessionRetirementsForDiagnosticsAsync([active.Session.Id], token);
                 HostStateSnapshot state = (await host.SendAsync(new GetHostStateCommand(), token)).State!;
-                Require(state.Sessions.Count == 0 && state.Assignments.Count == 1, "Active failure retained stale Surface or lost Assignment.");
-                var failedRetirement = host.GetRetirementHistoryForDiagnostics().SelectMany(batch => batch.Sessions).Single();
+                PreparedSession replacement = host.GetPreparedSessionsForDiagnostics().Single();
+                Require(state.Sessions.Count == 1 && state.Assignments.Count == 1 && replacement.Session.Id != active.Session.Id &&
+                    replacement.Session.WallpaperId == active.Session.WallpaperId && launcher.Records.Count == 2 && desktop.Replacements == 2,
+                    "Active failure was not restarted with a fresh Renderer and Surface.");
+                Require(((RendererProtocolSession)replacement.Renderer).ProcessId != oldProcessId &&
+                    replacement.Surfaces.Single().Surface.WindowHandle != oldHost, "Restart reused the failed Renderer or Surface.");
+                var failedRetirement = host.GetRetirementHistoryForDiagnostics().SelectMany(batch => batch.Sessions)
+                    .Single(item => item.SessionId == active.Session.Id);
                 Require(!failedRetirement.ShutdownCompleted && failedRetirement.RendererDisposed && failedRetirement.SurfacesCleaned,
                     "Failed Renderer cleanup fabricated a ShutdownCompleted or leaked resources.");
-                expectedFailure = new { failed, activeSessions = 0, assignmentPreserved = true, hostObservedWithoutInjection = true };
+                expectedFailure = new { failed, restarted, journal = host.GetRendererRecoveryJournalForDiagnostics(),
+                    assignmentPreserved = true, hostObservedWithoutInjection = true };
             }
         }
         finally
@@ -189,25 +198,32 @@ internal static class VideoHostControlPreflight
             }
             finally
             {
-                try { await host.DisposeAsync(); }
-                catch (AggregateException exception) when (scenario is "process-exit" or "pipe-disconnect" &&
-                    exception.Flatten().InnerExceptions.All(e => e is ActiveRendererFailureException))
-                {
-                    observedHostFailures = exception.Flatten().InnerExceptions.Cast<ActiveRendererFailureException>().ToArray();
-                    Require(observedHostFailures.Length == 1, "Unexpected number of active Host failures.");
-                }
+                // A handled Renderer failure is not a Host fault, so disposal must not report one.
+                await host.DisposeAsync();
             }
         }
         int[] exitCodes = launcher.Records.Select(record => record.ReadExitCode()).ToArray();
-        Require(scenario is "process-exit" or "pipe-disconnect" ? exitCodes.Single() != 0 : exitCodes[0] == 0 && exitCodes[^1] == 0,
+        Require(scenario is "process-exit" or "pipe-disconnect"
+                ? exitCodes.Length == 2 && exitCodes[0] != 0 && exitCodes[1] == 0
+                : exitCodes[0] == 0 && exitCodes[^1] == 0,
             "Unexpected real process return.");
         if (scenario == "load-failure") Require(exitCodes.Length == 3 && exitCodes[1] == 1, "Invalid media did not exit with a real failure.");
         Require(desktop.LiveCount == 0, "Owned Host windows remain.");
         return new { controls, expectedFailure, retirement, retirements = host.GetRetirementHistoryForDiagnostics(),
-            observedHostFailures = observedHostFailures.Select(e => new { e.Generation, e.ErrorCode }),
+            hostFaulted = false,
             rendererExitCodes = exitCodes,
             processCleanup = launcher.Records.Select(record => new { record.HostTerminationRequests, record.HostHandleDisposals }),
             replacementCount = desktop.Replacements, allOwnedResourcesCleaned = true };
+
+        async Task<RendererRecoveryEntry> Recovery(RendererRecoveryOutcome outcome, CancellationToken cancellation)
+        {
+            while (true)
+            {
+                if (host.GetRendererRecoveryJournalForDiagnostics().LastOrDefault(entry => entry.Outcome == outcome) is { } found)
+                    return found;
+                await Task.Delay(20, cancellation);
+            }
+        }
 
         async Task<ApplyGenerationResult> Apply(WallpaperId id)
         {
@@ -309,38 +325,5 @@ internal static class VideoHostControlPreflight
         public Task WaitForExitAsync(CancellationToken token) => inner.WaitForExitAsync(token);
         public void Terminate() { record.HostTerminationRequests++; inner.Terminate(); }
         public ValueTask DisposeAsync() { record.HostHandleDisposals++; return inner.DisposeAsync(); }
-    }
-    private sealed class HiddenDesktop : IDesktopHost, IDisposable
-    {
-        private readonly ConcurrentQueue<Action> owner = new();
-        private readonly ConcurrentDictionary<SurfaceId, ProbeWindow> windows = new();
-        private readonly ConcurrentDictionary<SurfaceId, TaskCompletionSource> destroyed = new();
-        public int Replacements { get; private set; }
-        public int LiveCount => windows.Count;
-        public Task Destroyed(SurfaceId id) => destroyed[id].Task;
-        private Task<T> OnOwner<T>(Func<T> action)
-        {
-            TaskCompletionSource<T> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            owner.Enqueue(() => { try { completion.TrySetResult(action()); } catch (Exception e) { completion.TrySetException(e); } });
-            return completion.Task;
-        }
-        public void Pump() { while (owner.TryDequeue(out Action? work)) work(); foreach (var window in windows.Values) { window.Pump(); break; } }
-        public Task<DesktopTopology> EnsureTopologyAsync(DisplayTopology displays, CancellationToken token) => Task.FromResult(new DesktopTopology(1, [new("hidden", "DirectComposition", "HwndChild")]));
-        public Task<DesktopSurface> CreateSurfaceAsync(SurfaceRequest request, CancellationToken token) => OnOwner(() =>
-        {
-            SurfaceId id = new(Guid.NewGuid().ToString("N"));
-            ProbeWindow window = ProbeWindow.CreateHiddenHost(request.Bounds.Width, request.Bounds.Height);
-            windows[id] = window; destroyed[id] = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            return new DesktopSurface(id, request.DisplayIds, unchecked((ulong)window.Handle.ToInt64()));
-        });
-        public Task ResizeSurfaceAsync(SurfaceId id, SurfaceRequest request, CancellationToken token) => OnOwner(() => { windows[id].Resize(request.Bounds.Width, request.Bounds.Height); return true; });
-        public Task ReplaceSurfacesAsync(SurfaceReplacement replacement, CancellationToken token) { Replacements++; return Task.CompletedTask; }
-        public Task DestroySurfaceAsync(SurfaceId id, CancellationToken token) => OnOwner(() =>
-        {
-            if (windows.TryRemove(id, out ProbeWindow? window)) window.Dispose();
-            destroyed[id].TrySetResult(); return true;
-        });
-        public Task AbandonSurfaceAsync(SurfaceId id, CancellationToken token) => DestroySurfaceAsync(id, token);
-        public void Dispose() { foreach (var id in windows.Keys) if (windows.TryRemove(id, out ProbeWindow? window)) window.Dispose(); }
     }
 }

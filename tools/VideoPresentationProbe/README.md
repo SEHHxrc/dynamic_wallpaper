@@ -4,6 +4,22 @@
 
 独立的开发诊断工具，不是正式 Video Renderer。C0 链接 `Renderer.Video/Mpv` 的私有后端源码；C1 则启动独立正式 Video 可执行文件，不用工具代替产品实现。工具可引用 Host/Platform/Infrastructure，产品 Video 仍只引用 Contracts。工具的 Win32 声明不链接产品；正式 Video Program 已接协议，但默认生产 Host 仓库/Provider 尚未启用，v1 DTO/Schema、Surface/Replace 契约及 allowlist 不变。
 
+## C3.0 隐藏 Renderer 崩溃恢复
+
+```powershell
+& $probe --host-crash-recovery-preflight $absoluteFormalVideoExe $absoluteDll $absoluteSourceVideo $freshDirectory
+```
+
+与可见入口共用 `HostCrashRecoveryDiagnostics`：在一个真实 Host 运行时里连杀 4 次正式 Video 进程，要求前三次在 0/2/8 秒退避后换新进程恢复、第 4 次熔断、最终无 Renderer 残留且隐藏窗口全部销毁。C3.0 起 `--host-control-preflight` 的 `process-exit` 和 `pipe-disconnect` 也按新语义验证：失败会话退休后立即以新 Renderer 和新 Surface 重启，命令循环关闭时不再报告 Host 故障。
+
+## C2.1 隐藏 Host 重启内容恢复
+
+```powershell
+& $probe --host-restore-preflight $absoluteFormalVideoExe $absoluteDll $absoluteSourceVideo $freshDirectory
+```
+
+与可见入口共用 `HostContentRestoreDiagnostics`：导入源视频 → 第一个 Host Apply 并停止持久化 → 第二个 Host 启动恢复。全程使用真实 Host 运行时、持久库、JSON 配置和默认 Video Provider，只把桌面换成私有隐藏容器。要求两个阶段各一次 Replace、Renderer ExitCode=0、隐藏窗口全部销毁；结果写入目录下的 `result.json`。多 Surface 隐藏桌面已提为共享的 `HiddenHostDesktop`，C1.3 控制场景也用它。
+
 ## C1.3 隐藏 Host 控制与失败门禁
 
 ```powershell

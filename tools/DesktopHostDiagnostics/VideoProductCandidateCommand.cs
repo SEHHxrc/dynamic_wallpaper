@@ -167,7 +167,7 @@ internal static class VideoProductCandidateCommand
         return exitCode;
     }
 
-    private static bool IsOwnedClass(string name) => name.StartsWith("LiveWall.DesktopSurface.", StringComparison.Ordinal) ||
+    internal static bool IsOwnedClass(string name) => name.StartsWith("LiveWall.DesktopSurface.", StringComparison.Ordinal) ||
         name.StartsWith("LiveWall.Renderer.Video.", StringComparison.Ordinal) ||
         name.StartsWith(RaisedDesktopHostSurfaceLease.WindowClassPrefix, StringComparison.Ordinal);
     private static object ValidateNativeControls(string path)
@@ -195,7 +195,7 @@ internal static class VideoProductCandidateCommand
         return new { pausedDeltaSeconds = pausedDelta, pausedSampleCount = paused.Length,
             resumedSampleCount = moving.Length, mediaTimeResumed = true, pausedFrameResubmitted = true, settingsPreserved = true };
     }
-    private static object Summary(ShellTopologySnapshot snapshot)
+    internal static object Summary(ShellTopologySnapshot snapshot)
     {
         var structure = snapshot.ShellDescendants.Select(window => new {
             className = window.ClassName.StartsWith("LiveWall.DesktopSurface.", StringComparison.Ordinal) ? "LiveWall.DesktopSurface" :

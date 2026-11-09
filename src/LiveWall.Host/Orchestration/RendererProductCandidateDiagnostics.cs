@@ -1509,7 +1509,7 @@ public static class RendererProductCandidateDiagnostics
     private static WallpaperDefinition CreateSyntheticWallpaper() =>
         SyntheticDiagnosticContent.CreateWallpaper("LiveWall product candidate color");
 
-    private static ProductCandidateSessionResult ToSessionResult(PreparedSession item) => new(
+    internal static ProductCandidateSessionResult ToSessionResult(PreparedSession item) => new(
         item.Session.Id,
         item.Session.RendererId,
         Array.AsReadOnly(item.Session.Displays.ToArray()),

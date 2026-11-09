@@ -1,5 +1,9 @@
 # Orchestration
 
+2026-11-08 C3.0：`HostCrashRecoveryDiagnostics` 在真实 Host 运行时里导入视频、Apply，再真实杀掉 Renderer 进程 1–4 次，核对 0/2/8 秒退避、每次换新进程、第 4 次熔断、Assignment 保留且 Host 不报故障；可见入口只多一个显式诊断附着覆盖。`RendererRecoveryJournal` 定义恢复日志的公开记录类型。
+
+2026-11-07 C2.1：`WallpaperImportCoordinator` 是 Host 侧导入管线（探测 → staging → 固定哈希 → 仓库提交）；组合根的 `CreateWallpaperRepository`/`CreateImportCoordinator` 是唯一的数据布局接线，诊断也复用它们。`HostContentRestoreDiagnostics` 在同一数据根上依次运行两个真实 `WindowsHostRuntime`，验证“导入 → Apply → 停止持久化 → 重启恢复”；可见入口只多一个显式的诊断附着覆盖，隐藏和自动测试入口用固定拓扑、无 Windows 事件源的隔离运行时。
+
 2026-11-06 C2.0：`DefaultRendererProviders` 是正式组合根的 Renderer 集合，只接受与 Host 同目录的 Video 可执行文件，缺失时为空并失败关闭；libmpv 由 Renderer 自行定位并校验哈希。只有替身自动验证，未用真实 Renderer 跑过默认链。
 
 C1.3（2026-11-03）代码、隐藏正式进程及单屏可见控制代表验收通过，Debug/Release 各 573/573；**C1 按有限范围关闭，C2 待启动**。新增 VideoControlCandidateDiagnostics 共用 Host 单写者，播放/暂停/重附着保持暂停/恢复各 5 秒，等待当前 generation 的实际反馈及新目标首帧，不重启 Explorer。RendererProtocolSession 仍只有一个接收泵/阶段消费者；ActiveFailure 通知不抢阶段事件，匹配已发送命令的迟到控制回执不能放行新 generation。活动正式 Renderer 失败时保留 Assignment、有界退休；共享恢复仍由原事务清理，强类型故障不被诊断吞掉。可见验收人工正常、实际 ExitCode=0、自有清理完整；本轮未新增 WorkerW，不能追改既有 mutation。双屏/真实 Video Explorer/长期资源及生产附着门禁保留。

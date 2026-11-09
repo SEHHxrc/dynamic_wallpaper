@@ -57,6 +57,13 @@ internal static class Program
                 catch (ArgumentException exception) { Console.Error.WriteLine(exception.Message); return 2; }
                 return await VideoProductCandidateCommand.RunAsync(videoOptions).ConfigureAwait(false);
             }
+            if (VideoHostScenarioOptions.IsRequested(args))
+            {
+                VideoHostScenarioOptions scenarioOptions;
+                try { scenarioOptions = VideoHostScenarioOptions.Parse(args); }
+                catch (ArgumentException exception) { Console.Error.WriteLine(exception.Message); return 2; }
+                return await VideoHostScenarioCommand.RunAsync(scenarioOptions).ConfigureAwait(false);
+            }
             if (args.Contains(ActiveSessionEndOptions.Mode, StringComparer.Ordinal))
             {
                 ActiveSessionEndOptions active = ActiveSessionEndOptions.Parse(args);

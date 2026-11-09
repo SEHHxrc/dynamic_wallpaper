@@ -8,3 +8,6 @@ C1.2 的 `VideoProductCandidateTests` 新增 26 项，覆盖显式呈现确认/�
 
 C1.3 再补 4 项：ActiveFailure 通知不消费阶段事件；已知在途播放回执到达 Bounds/新 binding 时不能冒充阶段完成；未发送对应命令的播放回执拒绝。可见阶段入口另补 3 项，覆盖确认门禁、只读分离与固定 20 秒（四段各 5 秒）计划。本项目当前 309 项；实际隐藏/可见原生证据独立记录，不混入普通自动测试数。
 
+C2.1 新增 `WallpaperImportCoordinatorTests`（导入提交、重复、无法识别、遗留 staging、导入器失败/越界/IO、仓库拒绝），以及经真实 JSON 配置和持久库、用 Fake Renderer/Desktop 的 Host 重启恢复驱动测试。
+
+C3.0 新增 `RendererCrashRecoveryTests`（8 项）和测试用的 `ManualTimeProvider`：用手动时钟覆盖立即重启、2/8 秒退避与熔断、60 秒窗口、失败的重启尝试、显式 Apply 清零、只重启崩溃的显示器、被取代的重启以及关闭时结束待定重启。本项目当前 336 项。
